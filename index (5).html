@@ -165,9 +165,9 @@
 
             <label>Time of Day:</label>
             <select id="time-of-day">
-                <option value="morning">Morning (Fog)</option>
+                <option value="morning" selected>Morning (Fog)</option>
                 <option value="noon">Noon</option>
-                <option value="sunset" selected>Sunset</option>
+                <option value="sunset">Sunset</option>
             </select>
 
             <label>Canyon Detail (LOD): <span id="lod-value" class="value-display">12</span></label>
@@ -230,7 +230,7 @@
             flightSpeed: 1.5,
             enemiesEnabled: false,
             enemyDifficulty: 5,
-            timeOfDay: 'sunset',
+            timeOfDay: 'morning',
             stabilizationEnabled: true
         };
 
@@ -249,7 +249,7 @@
         let enemies = [];
         let bullets = [];
         let enemyBullets = [];
-        let fogPlanes = [];
+        let debugCenterline = null;
 
         // Controls
         const keys = {};
@@ -357,7 +357,7 @@
         function getCanyonRimHeight(z) {
             // Base height + dramatic variation
             const base = CONFIG.canyonHeight;
-            const variation = pathNoise.noise2D(z * 0.004, 900) * 100; // +/- 100 units
+            const variation = pathNoise.noise2D(z * 0.004, 900) * 200; // +/- 200 units (2x max height)
             return base + variation;
         }
 
@@ -382,7 +382,6 @@
             setupLighting();
             createAircraft();
             createInitialCanyon();
-            createFogPlanes();
 
             // Event listeners
             setupEventListeners();
@@ -422,8 +421,13 @@
                     break;
             }
 
-            // Clear any Three.js fog
-            scene.fog = null;
+            // Set up fog for morning
+            if (CONFIG.timeOfDay === 'morning') {
+                // Exponential fog that follows camera automatically
+                scene.fog = new THREE.FogExp2(0xE8E8E8, 0.006);
+            } else {
+                scene.fog = null;
+            }
 
             // Gradient sky sphere
             const skyGeo = new THREE.SphereGeometry(2000, 32, 32);
@@ -467,52 +471,6 @@
             scene.add(sky);
         }
 
-        function createFogPlanes() {
-            // Remove old fog planes
-            fogPlanes.forEach(plane => scene.remove(plane));
-            fogPlanes = [];
-
-            if (CONFIG.timeOfDay !== 'morning') return;
-
-            // Create semi-translucent planes at regular intervals for fog effect
-            const fogColor = new THREE.Color(0xCCCCCC);
-            const numPlanes = 15;
-            const spacing = 80;
-
-            for (let i = 0; i < numPlanes; i++) {
-                const opacity = 0.03 + (i / numPlanes) * 0.08;
-                const fogMat = new THREE.MeshBasicMaterial({
-                    color: fogColor,
-                    transparent: true,
-                    opacity: opacity,
-                    side: THREE.DoubleSide,
-                    depthWrite: false
-                });
-
-                const fogGeo = new THREE.PlaneGeometry(CONFIG.canyonWidth * 2, CONFIG.canyonHeight * 2);
-                const fogPlane = new THREE.Mesh(fogGeo, fogMat);
-                fogPlane.userData.fogIndex = i;
-                fogPlane.userData.spacing = spacing;
-                fogPlane.renderOrder = 1000 + i;
-
-                scene.add(fogPlane);
-                fogPlanes.push(fogPlane);
-            }
-        }
-
-        function updateFogPlanes() {
-            if (CONFIG.timeOfDay !== 'morning') return;
-
-            fogPlanes.forEach((plane, i) => {
-                const spacing = plane.userData.spacing;
-                const baseZ = aircraft.position.z - 50;
-                const z = baseZ - (i + 1) * spacing;
-
-                // Position at canyon center
-                const centerX = getCanyonCenter(z);
-                plane.position.set(centerX, CONFIG.canyonHeight / 2, z);
-            });
-        }
 
         let sunLight, sunVisual;
 
@@ -600,63 +558,162 @@
             }
         }
 
+        function updateDebugCenterline() {
+            // Remove old centerline
+            if (debugCenterline) {
+                scene.remove(debugCenterline);
+            }
+
+            // Create points along canyon center
+            const points = [];
+            const startZ = playerZ + 100;  // Start behind player
+            const endZ = playerZ - 800;    // Extend far ahead
+            const step = 10;               // Point spacing
+            const waterlineHeight = 3;     // Just above the water
+
+            for (let z = startZ; z >= endZ; z -= step) {
+                const centerX = getCanyonCenter(z);
+                points.push(new THREE.Vector3(centerX, waterlineHeight, z));
+            }
+
+            // Create fat dotted line
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineDashedMaterial({
+                color: 0xFF00FF,      // Bright magenta for visibility
+                linewidth: 5,         // Fat line (note: may not work on all platforms)
+                scale: 1,
+                dashSize: 5,
+                gapSize: 3
+            });
+
+            debugCenterline = new THREE.Line(geometry, material);
+            debugCenterline.computeLineDistances();  // Required for dashed lines
+            scene.add(debugCenterline);
+        }
+
         function createAircraft() {
             aircraftGroup = new THREE.Group();
 
-            // Fuselage
-            const fuselageGeo = new THREE.CylinderGeometry(0.5, 0.8, 4, 8);
-            const fuselageMat = new THREE.MeshPhongMaterial({ color: 0x4488ff });
-            const fuselage = new THREE.Mesh(fuselageGeo, fuselageMat);
-            fuselage.rotation.x = Math.PI / 2;
+            // F22-style materials
+            const bodyMat = new THREE.MeshPhongMaterial({
+                color: 0x6B7280,  // Gray military color
+                flatShading: true
+            });
+            const darkMat = new THREE.MeshPhongMaterial({
+                color: 0x4B5563,  // Darker gray
+                flatShading: true
+            });
+
+            // Main fuselage (flat angular body like F22)
+            const fuselageGeo = new THREE.BoxGeometry(1.2, 0.8, 5);
+            const fuselage = new THREE.Mesh(fuselageGeo, bodyMat);
+            fuselage.position.z = 0.5;
             fuselage.castShadow = true;
             aircraftGroup.add(fuselage);
 
-            // Wings
-            const wingGeo = new THREE.BoxGeometry(8, 0.1, 1.5);
-            const wingMat = new THREE.MeshPhongMaterial({ color: 0x3377dd });
-            const wings = new THREE.Mesh(wingGeo, wingMat);
-            wings.position.z = 0.5;
-            wings.castShadow = true;
-            aircraftGroup.add(wings);
+            // Nose cone (pointed front)
+            const noseGeo = new THREE.ConeGeometry(0.6, 1.5, 4);
+            const nose = new THREE.Mesh(noseGeo, darkMat);
+            nose.rotation.x = -Math.PI / 2;
+            nose.position.z = -2.5;
+            nose.position.y = 0;
+            nose.castShadow = true;
+            aircraftGroup.add(nose);
 
-            // Tail
-            const tailGeo = new THREE.BoxGeometry(2, 0.1, 1);
-            const tail = new THREE.Mesh(tailGeo, wingMat);
-            tail.position.z = 2;
-            tail.position.y = 0.3;
-            tail.castShadow = true;
-            aircraftGroup.add(tail);
-
-            // Vertical stabilizer
-            const vStabGeo = new THREE.BoxGeometry(0.1, 1.5, 1);
-            const vStab = new THREE.Mesh(vStabGeo, wingMat);
-            vStab.position.z = 2;
-            vStab.position.y = 0.75;
-            vStab.castShadow = true;
-            aircraftGroup.add(vStab);
-
-            // Cockpit
-            const cockpitGeo = new THREE.SphereGeometry(0.6, 8, 8);
-            const cockpitMat = new THREE.MeshPhongMaterial({
-                color: 0x88ccff,
-                transparent: true,
-                opacity: 0.7
+            // Delta wings (swept back triangular - F22 style)
+            const wingShape = new THREE.Shape();
+            wingShape.moveTo(0, 0);
+            wingShape.lineTo(5, 0);
+            wingShape.lineTo(1, 2.5);
+            wingShape.lineTo(0, 2.5);
+            const wingGeo = new THREE.ExtrudeGeometry(wingShape, {
+                depth: 0.15,
+                bevelEnabled: false
             });
-            const cockpit = new THREE.Mesh(cockpitGeo, cockpitMat);
-            cockpit.position.z = -0.8;
-            cockpit.position.y = 0.3;
-            cockpit.scale.z = 1.5;
-            aircraftGroup.add(cockpit);
 
-            // Propeller
-            const propGeo = new THREE.BoxGeometry(2, 0.1, 0.2);
-            const propMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
-            const propeller = new THREE.Mesh(propGeo, propMat);
-            propeller.position.z = -2.2;
-            propeller.name = 'propeller';
-            aircraftGroup.add(propeller);
+            // Left wing
+            const leftWing = new THREE.Mesh(wingGeo, bodyMat);
+            leftWing.rotation.x = Math.PI / 2;
+            leftWing.rotation.z = Math.PI;
+            leftWing.position.set(-0.6, 0, 1);
+            leftWing.castShadow = true;
+            aircraftGroup.add(leftWing);
+
+            // Right wing
+            const rightWing = new THREE.Mesh(wingGeo, bodyMat);
+            rightWing.rotation.x = -Math.PI / 2;
+            rightWing.position.set(0.6, 0, 1);
+            rightWing.castShadow = true;
+            aircraftGroup.add(rightWing);
+
+            // Twin tail fins (F22 has twin vertical stabilizers)
+            const tailFinGeo = new THREE.BufferGeometry();
+            const tailVerts = new Float32Array([
+                0, 0, 0,
+                0.8, 0, 0,
+                0.5, 1.8, 0,
+                0, 0, 0.2,
+                0.8, 0, 0.2,
+                0.5, 1.8, 0.2
+            ]);
+            const tailIndices = [
+                0, 2, 1,  0, 1, 3,  1, 4, 3,
+                3, 4, 5,  2, 5, 4,  0, 3, 5,  0, 5, 2
+            ];
+            tailFinGeo.setAttribute('position', new THREE.BufferAttribute(tailVerts, 3));
+            tailFinGeo.setIndex(tailIndices);
+            tailFinGeo.computeVertexNormals();
+
+            // Left tail fin
+            const leftTail = new THREE.Mesh(tailFinGeo, darkMat);
+            leftTail.position.set(-0.8, 0, 2.2);
+            leftTail.rotation.y = Math.PI / 12;  // Slight outward angle
+            leftTail.castShadow = true;
+            aircraftGroup.add(leftTail);
+
+            // Right tail fin
+            const rightTail = new THREE.Mesh(tailFinGeo, darkMat);
+            rightTail.position.set(0, 0, 2.2);
+            rightTail.rotation.y = -Math.PI / 12;  // Slight outward angle
+            rightTail.castShadow = true;
+            aircraftGroup.add(rightTail);
+
+            // Horizontal stabilizers (small)
+            const hStabGeo = new THREE.BoxGeometry(2, 0.1, 0.8);
+            const hStab = new THREE.Mesh(hStabGeo, bodyMat);
+            hStab.position.z = 2.8;
+            hStab.position.y = 0.3;
+            hStab.castShadow = true;
+            aircraftGroup.add(hStab);
+
+            // Canopy (F22 style bubble canopy)
+            const canopyGeo = new THREE.SphereGeometry(0.5, 8, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+            const canopyMat = new THREE.MeshPhongMaterial({
+                color: 0x88CCFF,
+                transparent: true,
+                opacity: 0.6,
+                flatShading: true
+            });
+            const canopy = new THREE.Mesh(canopyGeo, canopyMat);
+            canopy.position.z = -0.5;
+            canopy.position.y = 0.6;
+            canopy.scale.z = 1.3;
+            aircraftGroup.add(canopy);
+
+            // Engine intakes (F22 has distinctive intakes)
+            const intakeGeo = new THREE.BoxGeometry(0.4, 0.4, 1.5);
+            const intakeMat = new THREE.MeshPhongMaterial({ color: 0x1a1a1a });
+
+            const leftIntake = new THREE.Mesh(intakeGeo, intakeMat);
+            leftIntake.position.set(-0.5, -0.3, 1.5);
+            aircraftGroup.add(leftIntake);
+
+            const rightIntake = new THREE.Mesh(intakeGeo, intakeMat);
+            rightIntake.position.set(0.5, -0.3, 1.5);
+            aircraftGroup.add(rightIntake);
 
             aircraftGroup.position.set(0, 25, 0);
+            aircraftGroup.scale.set(1.2, 1.2, 1.2);  // Scale up slightly
             aircraft = aircraftGroup;
             scene.add(aircraftGroup);
         }
@@ -721,12 +778,12 @@
 
                     // Left wall X position (wall leans inward at bottom for V, straighter for U)
                     const leftBaseX = localCenterX - localHalfWidth + (1 - yFrac) * localHalfWidth * (1 - wallAngle) - topExtension;
-                    const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, CONFIG.lodLevel) * 8;
+                    const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, CONFIG.lodLevel) * 15;  // Increased from 8 to 15
                     const leftX = leftBaseX - leftDisplacement;
 
                     // Right wall X position
                     const rightBaseX = localCenterX + localHalfWidth - (1 - yFrac) * localHalfWidth * (1 - wallAngle) + topExtension;
-                    const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, CONFIG.lodLevel) * 8;
+                    const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, CONFIG.lodLevel) * 15;  // Increased from 8 to 15
                     const rightX = rightBaseX + rightDisplacement;
 
                     leftVerts.push(leftX, y, z);
@@ -768,7 +825,7 @@
                         const baseHeight = vShapeFloor * (1 - localCrossSection) + uShapeFloor * localCrossSection;
 
                         // Add fractal detail - floor is never perfectly flat
-                        const detail = noise.fbm(z * 0.01, x * 0.02, CONFIG.lodLevel) * 3;
+                        const detail = noise.fbm(z * 0.01, x * 0.02, CONFIG.lodLevel) * 6;  // Increased from 3 to 6
                         height = baseHeight + detail;
                         // Brown rock color
                         floorColors.push(0.4, 0.26, 0.13); // RGB for rock
@@ -867,7 +924,7 @@
         }
 
         function createRing(parent, zPosition, canyonCenterX) {
-            const ringGeo = new THREE.TorusGeometry(5, 0.5, 8, 24);
+            const ringGeo = new THREE.TorusGeometry(12, 1.0, 8, 24);  // Larger ring: radius 12, tube 1.0
             const ringMat = new THREE.MeshPhongMaterial({
                 color: 0xFFD700,
                 emissive: 0x886600,
@@ -883,7 +940,8 @@
             const y = 15 + Math.random() * (CONFIG.canyonHeight - 60);
 
             ring.position.set(x, y, z);
-            ring.rotation.y = Math.PI / 2;
+            // Rotate 90 degrees so axis lines up with canyon (points along Z axis)
+            ring.rotation.x = Math.PI / 2;
             ring.userData.isRing = true;
             ring.userData.collected = false;
 
@@ -1024,7 +1082,6 @@
             // Update lighting and skybox
             updateSkybox();
             setupLighting();
-            createFogPlanes();
 
             // Regenerate canyon with new LOD
             regenerateCanyon();
@@ -1128,7 +1185,7 @@
                     const worldPos = new THREE.Vector3();
                     ring.getWorldPosition(worldPos);
 
-                    if (playerPos.distanceTo(worldPos) < 6) {
+                    if (playerPos.distanceTo(worldPos) < 14) {  // Increased for larger rings
                         ring.userData.collected = true;
                         ring.visible = false;
                         score += 100;
@@ -1216,33 +1273,27 @@
             aircraft.rotation.x = pitch;
             aircraft.rotation.z = -roll;
 
-            // Calculate movement direction
+            // Calculate movement directions in plane's local coordinate system
             const forward = new THREE.Vector3(0, 0, -1);
             forward.applyQuaternion(aircraft.quaternion);
 
-            // Move aircraft using actual physics (not sliding)
+            const localUp = new THREE.Vector3(0, 1, 0);
+            localUp.applyQuaternion(aircraft.quaternion);
+
+            // Move aircraft forward
             const speed = 50 * CONFIG.flightSpeed * delta;
             aircraft.position.add(forward.multiplyScalar(speed));
 
-            // Vertical movement from pitch
-            const verticalSpeed = -pitch * 30 * delta;
-            aircraft.position.y += verticalSpeed;
-
-            // Horizontal movement from roll (banking)
-            const horizontalSpeed = roll * 30 * delta;
-            aircraft.position.x += horizontalSpeed;
+            // Pitch movement is now relative to plane's roll (along local up direction)
+            // When rolled 90° left, pitching "up" moves left, creating a turn
+            const pitchSpeed = -pitch * 30 * delta;
+            aircraft.position.add(localUp.multiplyScalar(pitchSpeed));
 
             // Clamp vertical position only
             const lowestRim = CONFIG.canyonHeight - 100;
             aircraft.position.y = Math.max(8, Math.min(lowestRim - 10, aircraft.position.y));
 
             playerZ = aircraft.position.z;
-
-            // Rotate propeller
-            const propeller = aircraft.getObjectByName('propeller');
-            if (propeller) {
-                propeller.rotation.z += 30 * delta;
-            }
 
             // Update camera to follow aircraft
             const lookAheadZ = aircraft.position.z - 50;
@@ -1371,8 +1422,8 @@
                 updateCanyon();
                 updateEnemies(delta);
                 updateBullets(delta);
-                updateFogPlanes();
                 updateLightingPosition();
+                updateDebugCenterline();
                 checkCollisions();
             }
 

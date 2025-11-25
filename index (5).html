@@ -424,8 +424,8 @@
 
             // Set up fog for morning
             if (CONFIG.timeOfDay === 'morning') {
-                // Exponential fog that follows camera automatically
-                scene.fog = new THREE.FogExp2(0xE8E8E8, 0.006);
+                // Exponential fog that follows camera automatically (reduced density)
+                scene.fog = new THREE.FogExp2(0xD8E8E8, 0.0015);
             } else {
                 scene.fog = null;
             }
@@ -433,12 +433,15 @@
             // Gradient sky sphere
             const skyGeo = new THREE.SphereGeometry(2000, 32, 32);
             const skyMat = new THREE.ShaderMaterial({
-                uniforms: {
-                    topColor: { value: skyColors.top },
-                    bottomColor: { value: skyColors.bottom },
-                    offset: { value: 400 },
-                    exponent: { value: 0.6 }
-                },
+                uniforms: THREE.UniformsUtils.merge([
+                    THREE.UniformsLib.fog,
+                    {
+                        topColor: { value: skyColors.top },
+                        bottomColor: { value: skyColors.bottom },
+                        offset: { value: 400 },
+                        exponent: { value: 0.6 }
+                    }
+                ]),
                 vertexShader: `
                     varying vec3 vWorldPosition;
                     void main() {
@@ -458,7 +461,8 @@
                         gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
                     }
                 `,
-                side: THREE.BackSide
+                side: THREE.BackSide,
+                fog: true
             });
 
             const sky = new THREE.Mesh(skyGeo, skyMat);
@@ -652,7 +656,9 @@
 
                     // Scale and orient the model
                     model.scale.set(2, 2, 2);
-                    model.rotation.y = Math.PI; // Face forward
+                    // Rotate model: if left wing points forward and nose points right,
+                    // we need -90° rotation to make nose point forward
+                    model.rotation.y = -Math.PI / 2;
 
                     aircraftGroup.add(model);
                     modelLoaded = true;
@@ -849,7 +855,8 @@
                 color: 0x8B4513,
                 roughness: 0.9,
                 metalness: 0.1,
-                side: THREE.DoubleSide
+                side: THREE.DoubleSide,
+                fog: true
             });
 
             // Floor material with vertex colors (blue for water, brown for rock)
@@ -857,7 +864,8 @@
                 roughness: 0.3,
                 metalness: 0.7,
                 vertexColors: true,
-                envMapIntensity: 1.5
+                envMapIntensity: 1.5,
+                fog: true
             });
 
             // Create meshes
@@ -903,9 +911,9 @@
             const y = 15 + Math.random() * (CONFIG.canyonHeight - 60);
 
             ring.position.set(x, y, z);
-            // Rotate so ring is vertical and you fly through it along the canyon
+            // Rotate 90° on X axis so the ring stands upright and you fly through the circle
+            // (by default torus hole points up; we rotate it to point along Z axis)
             ring.rotation.x = Math.PI / 2;
-            ring.rotation.y = Math.PI / 2;
             ring.userData.isRing = true;
             ring.userData.collected = false;
 
@@ -1221,8 +1229,9 @@
                 if (keys['a']) roll = Math.max(roll - 2 * delta, -1.0);
                 else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
                 else {
-                    // Auto-roll towards canyon center
-                    roll = THREE.MathUtils.clamp(desiredRoll, -0.6, 0.6); // Limit max auto-roll
+                    // Auto-roll towards canyon center with smooth interpolation
+                    const targetRoll = THREE.MathUtils.clamp(desiredRoll, -0.6, 0.6); // Limit max auto-roll
+                    roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5); // Smooth transition
                 }
 
                 // Pitch control - slight upward bias to avoid floor

@@ -621,36 +621,45 @@
             // Try to load F22 model from assets folder
             const loader = new GLTFLoader();
             const modelPaths = [
-                './assets/f22.glb',
                 './assets/f22.gltf',
-                './assets/F22.glb',
-                './assets/F22.gltf'
+                './assets/F22.gltf',
+                './assets/f22.glb',
+                './assets/F22.glb'
             ];
 
             let modelLoaded = false;
 
             for (const path of modelPaths) {
                 try {
+                    console.log('Attempting to load model from:', path);
                     const gltf = await loader.loadAsync(path);
                     const model = gltf.scene;
 
-                    // Scale and orient the model
-                    model.scale.set(2, 2, 2);
-                    model.rotation.y = Math.PI; // Face forward
-
-                    // Enable shadows
+                    // Check if model has any meshes
+                    let hasMeshes = false;
                     model.traverse((child) => {
                         if (child.isMesh) {
+                            hasMeshes = true;
                             child.castShadow = true;
                             child.receiveShadow = true;
                         }
                     });
 
+                    if (!hasMeshes) {
+                        console.warn('Model loaded but contains no meshes:', path);
+                        continue;
+                    }
+
+                    // Scale and orient the model
+                    model.scale.set(2, 2, 2);
+                    model.rotation.y = Math.PI; // Face forward
+
                     aircraftGroup.add(model);
                     modelLoaded = true;
-                    console.log('F22 model loaded from:', path);
+                    console.log('✅ F22 model loaded successfully from:', path);
                     break;
                 } catch (error) {
+                    console.log('❌ Failed to load from', path, ':', error.message);
                     // Try next path
                     continue;
                 }
@@ -658,7 +667,11 @@
 
             // If no model loaded, use simple delta wing fallback
             if (!modelLoaded) {
-                console.log('F22 model not found, using simple delta wing');
+                console.log('⚠️ F22 model not found or failed to load, using simple delta wing fallback');
+                console.log('📁 Make sure these files are in the assets folder:');
+                console.log('   - f22.gltf (or f22.glb)');
+                console.log('   - scene.bin (if using .gltf format)');
+                console.log('   - Any texture files (.jpg, .png) referenced by the model');
                 const fallbackPlane = createSimpleDeltaWing();
                 aircraftGroup.add(fallbackPlane);
             }

@@ -217,6 +217,7 @@
 
     <script type="module">
         import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
         // Game Configuration
         const CONFIG = {
@@ -249,13 +250,13 @@
         let enemies = [];
         let bullets = [];
         let enemyBullets = [];
-        let debugCenterline = null;
 
         // Controls
         const keys = {};
         let pitch = 0;
         let roll = 0;
         let yaw = 0;
+        let lastCanyonOffset = 0;
 
         // Position tracking
         let playerZ = 0;
@@ -362,7 +363,7 @@
         }
 
         // Initialize the game
-        function init() {
+        async function init() {
             // Scene setup
             scene = new THREE.Scene();
 
@@ -380,7 +381,7 @@
             // Create game elements
             createSkybox();
             setupLighting();
-            createAircraft();
+            await createAircraft();  // Wait for aircraft to load
             createInitialCanyon();
 
             // Event listeners
@@ -558,162 +559,111 @@
             }
         }
 
-        function updateDebugCenterline() {
-            // Remove old centerline
-            if (debugCenterline) {
-                scene.remove(debugCenterline);
-            }
+        function createSimpleDeltaWing() {
+            // Simple, clean delta wing fighter
+            const group = new THREE.Group();
 
-            // Create points along canyon center
-            const points = [];
-            const startZ = playerZ + 100;  // Start behind player
-            const endZ = playerZ - 800;    // Extend far ahead
-            const step = 10;               // Point spacing
-            const waterlineHeight = 3;     // Just above the water
-
-            for (let z = startZ; z >= endZ; z -= step) {
-                const centerX = getCanyonCenter(z);
-                points.push(new THREE.Vector3(centerX, waterlineHeight, z));
-            }
-
-            // Create fat dotted line
-            const geometry = new THREE.BufferGeometry().setFromPoints(points);
-            const material = new THREE.LineDashedMaterial({
-                color: 0xFF00FF,      // Bright magenta for visibility
-                linewidth: 5,         // Fat line (note: may not work on all platforms)
-                scale: 1,
-                dashSize: 5,
-                gapSize: 3
-            });
-
-            debugCenterline = new THREE.Line(geometry, material);
-            debugCenterline.computeLineDistances();  // Required for dashed lines
-            scene.add(debugCenterline);
-        }
-
-        function createAircraft() {
-            aircraftGroup = new THREE.Group();
-
-            // F22-style materials
             const bodyMat = new THREE.MeshPhongMaterial({
-                color: 0x6B7280,  // Gray military color
-                flatShading: true
-            });
-            const darkMat = new THREE.MeshPhongMaterial({
-                color: 0x4B5563,  // Darker gray
+                color: 0x6B7280,
                 flatShading: true
             });
 
-            // Main fuselage (flat angular body like F22)
-            const fuselageGeo = new THREE.BoxGeometry(1.2, 0.8, 5);
+            // Fuselage (simple elongated diamond shape)
+            const fuselageGeo = new THREE.ConeGeometry(0.5, 4, 4);
             const fuselage = new THREE.Mesh(fuselageGeo, bodyMat);
-            fuselage.position.z = 0.5;
+            fuselage.rotation.x = -Math.PI / 2;
             fuselage.castShadow = true;
-            aircraftGroup.add(fuselage);
+            group.add(fuselage);
 
-            // Nose cone (pointed front)
-            const noseGeo = new THREE.ConeGeometry(0.6, 1.5, 4);
-            const nose = new THREE.Mesh(noseGeo, darkMat);
-            nose.rotation.x = -Math.PI / 2;
-            nose.position.z = -2.5;
-            nose.position.y = 0;
-            nose.castShadow = true;
-            aircraftGroup.add(nose);
-
-            // Delta wings (swept back triangular - F22 style)
+            // Delta wing (single swept wing)
             const wingShape = new THREE.Shape();
-            wingShape.moveTo(0, 0);
-            wingShape.lineTo(5, 0);
-            wingShape.lineTo(1, 2.5);
-            wingShape.lineTo(0, 2.5);
-            const wingGeo = new THREE.ExtrudeGeometry(wingShape, {
-                depth: 0.15,
-                bevelEnabled: false
-            });
+            wingShape.moveTo(0, 0);      // Center front
+            wingShape.lineTo(-4, 2);     // Left tip
+            wingShape.lineTo(0, 1.5);    // Back center
+            wingShape.lineTo(4, 2);      // Right tip
+            wingShape.lineTo(0, 0);      // Back to front
 
-            // Left wing
-            const leftWing = new THREE.Mesh(wingGeo, bodyMat);
-            leftWing.rotation.x = Math.PI / 2;
-            leftWing.rotation.z = Math.PI;
-            leftWing.position.set(-0.6, 0, 1);
-            leftWing.castShadow = true;
-            aircraftGroup.add(leftWing);
+            const wingGeo = new THREE.ShapeGeometry(wingShape);
+            const wing = new THREE.Mesh(wingGeo, bodyMat);
+            wing.rotation.x = -Math.PI / 2;
+            wing.position.y = -0.1;
+            wing.castShadow = true;
+            group.add(wing);
 
-            // Right wing
-            const rightWing = new THREE.Mesh(wingGeo, bodyMat);
-            rightWing.rotation.x = -Math.PI / 2;
-            rightWing.position.set(0.6, 0, 1);
-            rightWing.castShadow = true;
-            aircraftGroup.add(rightWing);
+            // Single vertical stabilizer
+            const tailGeo = new THREE.ConeGeometry(0.3, 1.2, 3);
+            const tail = new THREE.Mesh(tailGeo, bodyMat);
+            tail.position.y = 0.6;
+            tail.position.z = 1.5;
+            tail.castShadow = true;
+            group.add(tail);
 
-            // Twin tail fins (F22 has twin vertical stabilizers)
-            const tailFinGeo = new THREE.BufferGeometry();
-            const tailVerts = new Float32Array([
-                0, 0, 0,
-                0.8, 0, 0,
-                0.5, 1.8, 0,
-                0, 0, 0.2,
-                0.8, 0, 0.2,
-                0.5, 1.8, 0.2
-            ]);
-            const tailIndices = [
-                0, 2, 1,  0, 1, 3,  1, 4, 3,
-                3, 4, 5,  2, 5, 4,  0, 3, 5,  0, 5, 2
-            ];
-            tailFinGeo.setAttribute('position', new THREE.BufferAttribute(tailVerts, 3));
-            tailFinGeo.setIndex(tailIndices);
-            tailFinGeo.computeVertexNormals();
-
-            // Left tail fin
-            const leftTail = new THREE.Mesh(tailFinGeo, darkMat);
-            leftTail.position.set(-0.8, 0, 2.2);
-            leftTail.rotation.y = Math.PI / 12;  // Slight outward angle
-            leftTail.castShadow = true;
-            aircraftGroup.add(leftTail);
-
-            // Right tail fin
-            const rightTail = new THREE.Mesh(tailFinGeo, darkMat);
-            rightTail.position.set(0, 0, 2.2);
-            rightTail.rotation.y = -Math.PI / 12;  // Slight outward angle
-            rightTail.castShadow = true;
-            aircraftGroup.add(rightTail);
-
-            // Horizontal stabilizers (small)
-            const hStabGeo = new THREE.BoxGeometry(2, 0.1, 0.8);
-            const hStab = new THREE.Mesh(hStabGeo, bodyMat);
-            hStab.position.z = 2.8;
-            hStab.position.y = 0.3;
-            hStab.castShadow = true;
-            aircraftGroup.add(hStab);
-
-            // Canopy (F22 style bubble canopy)
-            const canopyGeo = new THREE.SphereGeometry(0.5, 8, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+            // Cockpit
+            const canopyGeo = new THREE.SphereGeometry(0.3, 8, 8);
             const canopyMat = new THREE.MeshPhongMaterial({
                 color: 0x88CCFF,
                 transparent: true,
-                opacity: 0.6,
-                flatShading: true
+                opacity: 0.7
             });
             const canopy = new THREE.Mesh(canopyGeo, canopyMat);
-            canopy.position.z = -0.5;
-            canopy.position.y = 0.6;
-            canopy.scale.z = 1.3;
-            aircraftGroup.add(canopy);
+            canopy.position.z = -0.8;
+            canopy.position.y = 0.2;
+            canopy.scale.set(1, 0.8, 1.3);
+            group.add(canopy);
 
-            // Engine intakes (F22 has distinctive intakes)
-            const intakeGeo = new THREE.BoxGeometry(0.4, 0.4, 1.5);
-            const intakeMat = new THREE.MeshPhongMaterial({ color: 0x1a1a1a });
+            group.scale.set(1.5, 1.5, 1.5);
+            return group;
+        }
 
-            const leftIntake = new THREE.Mesh(intakeGeo, intakeMat);
-            leftIntake.position.set(-0.5, -0.3, 1.5);
-            aircraftGroup.add(leftIntake);
+        async function createAircraft() {
+            aircraftGroup = new THREE.Group();
 
-            const rightIntake = new THREE.Mesh(intakeGeo, intakeMat);
-            rightIntake.position.set(0.5, -0.3, 1.5);
-            aircraftGroup.add(rightIntake);
+            // Try to load F22 model from assets folder
+            const loader = new GLTFLoader();
+            const modelPaths = [
+                './assets/f22.glb',
+                './assets/f22.gltf',
+                './assets/F22.glb',
+                './assets/F22.gltf'
+            ];
+
+            let modelLoaded = false;
+
+            for (const path of modelPaths) {
+                try {
+                    const gltf = await loader.loadAsync(path);
+                    const model = gltf.scene;
+
+                    // Scale and orient the model
+                    model.scale.set(2, 2, 2);
+                    model.rotation.y = Math.PI; // Face forward
+
+                    // Enable shadows
+                    model.traverse((child) => {
+                        if (child.isMesh) {
+                            child.castShadow = true;
+                            child.receiveShadow = true;
+                        }
+                    });
+
+                    aircraftGroup.add(model);
+                    modelLoaded = true;
+                    console.log('F22 model loaded from:', path);
+                    break;
+                } catch (error) {
+                    // Try next path
+                    continue;
+                }
+            }
+
+            // If no model loaded, use simple delta wing fallback
+            if (!modelLoaded) {
+                console.log('F22 model not found, using simple delta wing');
+                const fallbackPlane = createSimpleDeltaWing();
+                aircraftGroup.add(fallbackPlane);
+            }
 
             aircraftGroup.position.set(0, 25, 0);
-            aircraftGroup.scale.set(1.2, 1.2, 1.2);  // Scale up slightly
             aircraft = aircraftGroup;
             scene.add(aircraftGroup);
         }
@@ -940,8 +890,9 @@
             const y = 15 + Math.random() * (CONFIG.canyonHeight - 60);
 
             ring.position.set(x, y, z);
-            // Rotate 90 degrees so axis lines up with canyon (points along Z axis)
+            // Rotate so ring is vertical and you fly through it along the canyon
             ring.rotation.x = Math.PI / 2;
+            ring.rotation.y = Math.PI / 2;
             ring.userData.isRing = true;
             ring.userData.collected = false;
 
@@ -1235,27 +1186,44 @@
         }
 
         function updateAircraft(delta) {
-            const canyonCenterX = getCanyonCenter(aircraft.position.z);
+            // Look ahead to follow the canyon path better
+            const lookAheadDistance = 150;
+            const targetZ = aircraft.position.z - lookAheadDistance;
+            const canyonCenterX = getCanyonCenter(targetZ);
 
             // Auto-stabilization: follow canyon center
             if (CONFIG.stabilizationEnabled) {
-                // Calculate desired roll to follow canyon
+                // Calculate offset from canyon center
                 const localX = aircraft.position.x - canyonCenterX;
-                const desiredRoll = -localX * 0.01; // Proportional control
+
+                // PD controller: Proportional + Derivative
+                const kP = 0.03; // Proportional gain (increased from 0.015)
+                const kD = 0.05; // Derivative gain (dampens oscillations)
+
+                const offsetRate = (localX - lastCanyonOffset) / delta;
+                const desiredRoll = -localX * kP - offsetRate * kD;
+                lastCanyonOffset = localX;
 
                 // User input modifies roll
                 if (keys['a']) roll = Math.max(roll - 2 * delta, -1.0);
                 else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
                 else {
-                    // Auto-roll towards desired position
-                    const rollDiff = desiredRoll - roll;
-                    roll += rollDiff * 2 * delta; // Smooth interpolation
+                    // Auto-roll towards canyon center
+                    roll = THREE.MathUtils.clamp(desiredRoll, -0.6, 0.6); // Limit max auto-roll
                 }
 
-                // Pitch control
+                // Pitch control - slight upward bias to avoid floor
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
-                else pitch *= 0.95;
+                else {
+                    // Auto-pitch slightly upward if getting too low
+                    const targetHeight = 30;
+                    if (aircraft.position.y < targetHeight) {
+                        pitch = THREE.MathUtils.lerp(pitch, -0.1, delta * 2);
+                    } else {
+                        pitch *= 0.95;
+                    }
+                }
             } else {
                 // Manual control without stabilization
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
@@ -1266,26 +1234,37 @@
 
                 // Yaw based on roll (banking turns)
                 yaw += roll * delta * 0.5;
-                aircraft.rotation.y = yaw;
             }
 
-            // Apply rotation
-            aircraft.rotation.x = pitch;
-            aircraft.rotation.z = -roll;
+            // Apply rotations using quaternions for proper local-axis rotation
+            // Order: Roll first, then pitch around the rolled axis
+            const qRoll = new THREE.Quaternion();
+            qRoll.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -roll);
 
-            // Calculate movement directions in plane's local coordinate system
+            const qPitch = new THREE.Quaternion();
+            qPitch.setFromAxisAngle(new THREE.Vector3(1, 0, 0), pitch);
+
+            const qYaw = new THREE.Quaternion();
+            qYaw.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+
+            // Combine rotations: Yaw * Roll * Pitch
+            aircraft.quaternion.copy(qYaw);
+            aircraft.quaternion.multiply(qRoll);
+            aircraft.quaternion.multiply(qPitch);
+
+            // Calculate movement in plane's local coordinate system
             const forward = new THREE.Vector3(0, 0, -1);
             forward.applyQuaternion(aircraft.quaternion);
 
             const localUp = new THREE.Vector3(0, 1, 0);
             localUp.applyQuaternion(aircraft.quaternion);
 
-            // Move aircraft forward
+            // Move aircraft forward at constant speed
             const speed = 50 * CONFIG.flightSpeed * delta;
             aircraft.position.add(forward.multiplyScalar(speed));
 
-            // Pitch movement is now relative to plane's roll (along local up direction)
-            // When rolled 90° left, pitching "up" moves left, creating a turn
+            // Pitch creates lift in the plane's local up direction
+            // This makes rolled flight work correctly - pitching up while rolled left turns left
             const pitchSpeed = -pitch * 30 * delta;
             aircraft.position.add(localUp.multiplyScalar(pitchSpeed));
 
@@ -1423,7 +1402,6 @@
                 updateEnemies(delta);
                 updateBullets(delta);
                 updateLightingPosition();
-                updateDebugCenterline();
                 checkCollisions();
             }
 

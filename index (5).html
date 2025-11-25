@@ -267,6 +267,8 @@
         let optimalPathLine = null;
         let debugPitchCircle = null;
         let debugRollCircle = null;
+        let debugTravelArrow = null;
+        let debugNoseArrow = null;
 
         // Controls
         const keys = {};
@@ -619,6 +621,45 @@
                 const offset = sunVisual.userData.initialPosition;
                 sunVisual.position.copy(aircraft.position).add(offset);
             }
+        }
+
+        function updateDebugArrows(travelDirection) {
+            if (!aircraft) return;
+
+            // Remove old arrows
+            if (debugTravelArrow) {
+                scene.remove(debugTravelArrow);
+            }
+            if (debugNoseArrow) {
+                scene.remove(debugNoseArrow);
+            }
+
+            // Arrow showing actual direction of travel (GREEN)
+            const travelDir = travelDirection.clone().normalize();
+            const arrowOrigin = aircraft.position.clone();
+            arrowOrigin.add(new THREE.Vector3(0, 0, -10).applyQuaternion(aircraft.quaternion)); // Front of plane
+            debugTravelArrow = new THREE.ArrowHelper(
+                travelDir,
+                arrowOrigin,
+                15,  // length
+                0x00FF00,  // green
+                3,  // head length
+                2   // head width
+            );
+            scene.add(debugTravelArrow);
+
+            // Arrow showing nose direction (RED)
+            const noseDir = new THREE.Vector3(0, 0, -1);
+            noseDir.applyQuaternion(aircraft.quaternion);
+            debugNoseArrow = new THREE.ArrowHelper(
+                noseDir,
+                arrowOrigin,
+                15,  // length
+                0xFF0000,  // red
+                3,  // head length
+                2   // head width
+            );
+            scene.add(debugNoseArrow);
         }
 
         function updateDebugCircles() {
@@ -1487,7 +1528,8 @@
                 else {
                     // Coordinated turn: apply pitch proportional to roll for banking turns
                     // When rolled, pitch up to execute the turn
-                    const turnPitch = -Math.abs(roll) * 0.25;  // Pull up when banked
+                    // Increased from 0.25 to 0.5 for more aggressive turns
+                    const turnPitch = -Math.abs(roll) * 0.5;  // Pull up when banked
 
                     // Auto-pitch to reach optimal altitude
                     const heightError = optimalPos.y - aircraft.position.y;
@@ -1495,19 +1537,22 @@
 
                     // Combine turn pitch and altitude pitch
                     const combinedPitch = turnPitch + altitudePitch;
-                    const desiredPitch = THREE.MathUtils.clamp(combinedPitch, -0.3, 0.3);
+                    const desiredPitch = THREE.MathUtils.clamp(combinedPitch, -0.5, 0.5);
                     pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 3);
                 }
             } else {
                 // Manual control without stabilization
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
+                else pitch *= 0.95;  // Decay pitch when not actively controlling
 
                 if (keys['a']) roll = Math.max(roll - 2 * delta, -1.0);
                 else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
+                else roll *= 0.95;  // Decay roll when not actively controlling
 
-                // Yaw based on roll (banking turns)
-                yaw += roll * delta * 0.5;
+                // Don't accumulate yaw - it causes spinning
+                // Instead, yaw should be controlled separately if needed
+                yaw *= 0.98;  // Slowly decay yaw
             }
 
             // Apply rotations using quaternions for proper local-axis rotation
@@ -1526,21 +1571,17 @@
             aircraft.quaternion.multiply(qRoll);
             aircraft.quaternion.multiply(qPitch);
 
-            // Calculate movement in plane's local coordinate system
-            const forward = new THREE.Vector3(0, 0, -1);
-            forward.applyQuaternion(aircraft.quaternion);
+            // Calculate direction the nose is pointing
+            const noseDirection = new THREE.Vector3(0, 0, -1);
+            noseDirection.applyQuaternion(aircraft.quaternion);
 
-            const localUp = new THREE.Vector3(0, 1, 0);
-            localUp.applyQuaternion(aircraft.quaternion);
-
-            // Move aircraft forward at constant speed
+            // Move ONLY in the direction the nose is pointing
             const speed = 50 * CONFIG.flightSpeed * delta;
-            aircraft.position.add(forward.multiplyScalar(speed));
+            const movement = noseDirection.multiplyScalar(speed);
+            aircraft.position.add(movement);
 
-            // Pitch creates lift in the plane's local up direction
-            // This makes rolled flight work correctly - pitching up while rolled left turns left
-            const pitchSpeed = -pitch * 30 * delta;
-            aircraft.position.add(localUp.multiplyScalar(pitchSpeed));
+            // Update debug arrows with actual travel direction
+            updateDebugArrows(movement);
 
             // Clamp vertical position only
             const lowestRim = CONFIG.canyonHeight - 100;

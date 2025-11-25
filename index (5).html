@@ -176,6 +176,16 @@
             <label>Ring Frequency: <span id="ring-freq-value" class="value-display">3</span></label>
             <input type="range" id="ring-frequency" min="0" max="10" value="3">
 
+            <label>Ring Rotation Axis:</label>
+            <select id="ring-rotation-axis">
+                <option value="x">X-axis (default)</option>
+                <option value="y">Y-axis</option>
+                <option value="z">Z-axis</option>
+                <option value="xy">X+Y axes</option>
+                <option value="xz">X+Z axes</option>
+                <option value="yz">Y+Z axes</option>
+            </select>
+
             <label>Flight Speed: <span id="speed-value" class="value-display">1.5</span>x</label>
             <input type="range" id="flight-speed" min="0.5" max="3" step="0.1" value="1.5">
 
@@ -228,6 +238,7 @@
             visibleSegments: 25,
             lodLevel: 12,
             ringFrequency: 3,
+            ringRotationAxis: 'x',
             flightSpeed: 1.5,
             enemiesEnabled: false,
             enemyDifficulty: 5,
@@ -252,6 +263,7 @@
         let enemyBullets = [];
         let autopilotPathLine = null;
         let canyonCenterLine = null;
+        let optimalPathLine = null;
 
         // Controls
         const keys = {};
@@ -362,6 +374,47 @@
             const base = CONFIG.canyonHeight;
             const variation = pathNoise.noise2D(z * 0.004, 900) * 200; // +/- 200 units (2x max height)
             return base + variation;
+        }
+
+        // Calculate optimal flight path that stays in middle third of canyon
+        // Returns {x, y} position at given z
+        function getOptimalFlightPath(z, currentX = 0) {
+            const centerX = getCanyonCenter(z);
+            const widthMultiplier = getCanyonWidthMultiplier(z);
+            const canyonWidth = CONFIG.canyonWidth * widthMultiplier;
+
+            // Middle third boundaries (±1/6 of canyon width from center)
+            const middleThirdWidth = canyonWidth / 3;
+            const leftBound = centerX - middleThirdWidth / 2;
+            const rightBound = centerX + middleThirdWidth / 2;
+
+            // Try to stay as straight as possible (minimize X changes)
+            // But stay within middle third bounds
+            let targetX = currentX;
+
+            // If we're outside the middle third, move toward it
+            if (currentX < leftBound) {
+                targetX = leftBound;
+            } else if (currentX > rightBound) {
+                targetX = rightBound;
+            } else {
+                // We're inside the middle third
+                // Try to move toward the canyon center for smoothest path
+                // but don't force it - only if it's closer
+                const toCenterDelta = centerX - currentX;
+                const moveTowardCenter = toCenterDelta * 0.1; // Gentle pull
+                targetX = currentX + moveTowardCenter;
+
+                // Make sure we stay in bounds
+                targetX = Math.max(leftBound, Math.min(rightBound, targetX));
+            }
+
+            // Target height: middle of flight envelope
+            const floorHeight = 8; // Safe floor height from collision detection
+            const ceilingHeight = CONFIG.canyonHeight - 110; // Safe ceiling
+            const targetY = (floorHeight + ceilingHeight) / 2; // Middle altitude
+
+            return { x: targetX, y: targetY };
         }
 
         // Initialize the game
@@ -575,16 +628,17 @@
             if (canyonCenterLine) {
                 scene.remove(canyonCenterLine);
             }
+            if (optimalPathLine) {
+                scene.remove(optimalPathLine);
+            }
 
-            const lookAheadDistance = 150;
-            const targetHeight = 30;  // Autopilot target height
-
-            // Purple line: Autopilot's desired path (canyon center at target height)
-            const autopilotPoints = [];
             const startZ = aircraft.position.z + 50;  // Start a bit behind
             const endZ = aircraft.position.z - 800;   // Extend far ahead
             const step = 10;
 
+            // Purple line: Canyon center at fixed height (old autopilot reference)
+            const targetHeight = 30;
+            const autopilotPoints = [];
             for (let z = startZ; z >= endZ; z -= step) {
                 const centerX = getCanyonCenter(z);
                 autopilotPoints.push(new THREE.Vector3(centerX, targetHeight, z));
@@ -622,6 +676,28 @@
             canyonCenterLine = new THREE.Line(canyonCenterGeometry, canyonCenterMaterial);
             canyonCenterLine.computeLineDistances();
             scene.add(canyonCenterLine);
+
+            // Blue line: Optimal flight path (straightest path in middle third)
+            const optimalPathPoints = [];
+            let currentX = aircraft.position.x;
+            for (let z = startZ; z >= endZ; z -= step) {
+                const optimalPos = getOptimalFlightPath(z, currentX);
+                optimalPathPoints.push(new THREE.Vector3(optimalPos.x, optimalPos.y, z));
+                currentX = optimalPos.x; // Track for next iteration
+            }
+
+            const optimalGeometry = new THREE.BufferGeometry().setFromPoints(optimalPathPoints);
+            const optimalMaterial = new THREE.LineDashedMaterial({
+                color: 0x0088FF,      // Blue
+                linewidth: 5,
+                scale: 1,
+                dashSize: 5,
+                gapSize: 3
+            });
+
+            optimalPathLine = new THREE.Line(optimalGeometry, optimalMaterial);
+            optimalPathLine.computeLineDistances();
+            scene.add(optimalPathLine);
         }
 
         function createSimpleDeltaWing() {
@@ -716,7 +792,7 @@
                     }
 
                     // Scale and orient the model
-                    model.scale.set(2, 2, 2);
+                    model.scale.set(4, 4, 4);  // 2x larger than before
                     // Rotate model: if left wing points forward and nose points right,
                     // we need -90° rotation to make nose point forward
                     model.rotation.y = -Math.PI / 2;
@@ -972,9 +1048,33 @@
             const y = 15 + Math.random() * (CONFIG.canyonHeight - 60);
 
             ring.position.set(x, y, z);
-            // Rotate 90° on X axis so the ring stands upright and you fly through the circle
-            // (by default torus hole points up; we rotate it to point along Z axis)
-            ring.rotation.x = Math.PI / 2;
+
+            // Apply rotation based on config setting
+            // (by default torus hole points up along Y axis)
+            switch (CONFIG.ringRotationAxis) {
+                case 'x':
+                    ring.rotation.x = Math.PI / 2;
+                    break;
+                case 'y':
+                    ring.rotation.y = Math.PI / 2;
+                    break;
+                case 'z':
+                    ring.rotation.z = Math.PI / 2;
+                    break;
+                case 'xy':
+                    ring.rotation.x = Math.PI / 2;
+                    ring.rotation.y = Math.PI / 2;
+                    break;
+                case 'xz':
+                    ring.rotation.x = Math.PI / 2;
+                    ring.rotation.z = Math.PI / 2;
+                    break;
+                case 'yz':
+                    ring.rotation.y = Math.PI / 2;
+                    ring.rotation.z = Math.PI / 2;
+                    break;
+            }
+
             ring.userData.isRing = true;
             ring.userData.collected = false;
 
@@ -1107,6 +1207,7 @@
             CONFIG.timeOfDay = document.getElementById('time-of-day').value;
             CONFIG.lodLevel = parseInt(document.getElementById('canyon-lod').value);
             CONFIG.ringFrequency = parseInt(document.getElementById('ring-frequency').value);
+            CONFIG.ringRotationAxis = document.getElementById('ring-rotation-axis').value;
             CONFIG.flightSpeed = parseFloat(document.getElementById('flight-speed').value);
             CONFIG.stabilizationEnabled = document.getElementById('stabilization-enabled').checked;
             CONFIG.enemiesEnabled = document.getElementById('enemies-enabled').checked;
@@ -1116,7 +1217,7 @@
             updateSkybox();
             setupLighting();
 
-            // Regenerate canyon with new LOD
+            // Regenerate canyon with new LOD and ring settings
             regenerateCanyon();
         }
 
@@ -1268,44 +1369,43 @@
         }
 
         function updateAircraft(delta) {
-            // Look ahead to follow the canyon path better
+            // Look ahead to follow the optimal path
             const lookAheadDistance = 150;
             const targetZ = aircraft.position.z - lookAheadDistance;
-            const canyonCenterX = getCanyonCenter(targetZ);
 
-            // Auto-stabilization: follow canyon center
+            // Auto-stabilization: follow optimal flight path
             if (CONFIG.stabilizationEnabled) {
-                // Calculate offset from canyon center
-                const localX = aircraft.position.x - canyonCenterX;
+                // Get optimal path position at look-ahead point
+                const optimalPos = getOptimalFlightPath(targetZ, aircraft.position.x);
 
-                // PD controller: Proportional + Derivative
-                const kP = 0.03; // Proportional gain (increased from 0.015)
-                const kD = 0.05; // Derivative gain (dampens oscillations)
+                // Calculate offsets from optimal path
+                const offsetX = aircraft.position.x - optimalPos.x;
+                const offsetY = aircraft.position.y - optimalPos.y;
 
-                const offsetRate = (localX - lastCanyonOffset) / delta;
-                const desiredRoll = -localX * kP - offsetRate * kD;
-                lastCanyonOffset = localX;
+                // PD controller for horizontal (roll) control
+                const kP_roll = 0.02;
+                const kD_roll = 0.04;
+                const offsetRate = (offsetX - lastCanyonOffset) / delta;
+                const desiredRoll = -offsetX * kP_roll - offsetRate * kD_roll;
+                lastCanyonOffset = offsetX;
 
                 // User input modifies roll
                 if (keys['a']) roll = Math.max(roll - 2 * delta, -1.0);
                 else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
                 else {
-                    // Auto-roll towards canyon center with smooth interpolation
-                    const targetRoll = THREE.MathUtils.clamp(desiredRoll, -0.6, 0.6); // Limit max auto-roll
-                    roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5); // Smooth transition
+                    // Auto-roll towards optimal path with smooth interpolation
+                    const targetRoll = THREE.MathUtils.clamp(desiredRoll, -0.5, 0.5);
+                    roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 4);
                 }
 
-                // Pitch control - slight upward bias to avoid floor
+                // Pitch control - move toward optimal altitude
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                 else {
-                    // Auto-pitch slightly upward if getting too low
-                    const targetHeight = 30;
-                    if (aircraft.position.y < targetHeight) {
-                        pitch = THREE.MathUtils.lerp(pitch, -0.1, delta * 2);
-                    } else {
-                        pitch *= 0.95;
-                    }
+                    // Auto-pitch to reach optimal altitude
+                    const heightError = optimalPos.y - aircraft.position.y;
+                    const desiredPitch = THREE.MathUtils.clamp(heightError * 0.02, -0.15, 0.15);
+                    pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 3);
                 }
             } else {
                 // Manual control without stabilization

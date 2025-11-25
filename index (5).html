@@ -178,9 +178,9 @@
 
             <label>Ring Rotation Axis:</label>
             <select id="ring-rotation-axis">
-                <option value="x">X-axis (default)</option>
+                <option value="x">X-axis</option>
                 <option value="y">Y-axis</option>
-                <option value="z">Z-axis</option>
+                <option value="z" selected>Z-axis (default)</option>
                 <option value="xy">X+Y axes</option>
                 <option value="xz">X+Z axes</option>
                 <option value="yz">Y+Z axes</option>
@@ -238,7 +238,7 @@
             visibleSegments: 25,
             lodLevel: 12,
             ringFrequency: 3,
-            ringRotationAxis: 'x',
+            ringRotationAxis: 'z',  // Z-axis is correct
             flightSpeed: 1.5,
             enemiesEnabled: false,
             enemyDifficulty: 5,
@@ -884,12 +884,17 @@
 
                     // Left wall X position (wall leans inward at bottom for V, straighter for U)
                     const leftBaseX = localCenterX - localHalfWidth + (1 - yFrac) * localHalfWidth * (1 - wallAngle) - topExtension;
-                    const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, CONFIG.lodLevel) * 15;  // Increased from 8 to 15
+
+                    // Scale fractal detail with LOD: more octaves = more crinkly
+                    // Base displacement scales with LOD level
+                    const lodScale = Math.max(1, CONFIG.lodLevel / 6);  // Scale factor based on LOD
+                    const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 8));  // Use LOD as octave count
+                    const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
                     const leftX = leftBaseX - leftDisplacement;
 
                     // Right wall X position
                     const rightBaseX = localCenterX + localHalfWidth - (1 - yFrac) * localHalfWidth * (1 - wallAngle) + topExtension;
-                    const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, CONFIG.lodLevel) * 15;  // Increased from 8 to 15
+                    const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
                     const rightX = rightBaseX + rightDisplacement;
 
                     leftVerts.push(leftX, y, z);
@@ -931,7 +936,10 @@
                         const baseHeight = vShapeFloor * (1 - localCrossSection) + uShapeFloor * localCrossSection;
 
                         // Add fractal detail - floor is never perfectly flat
-                        const detail = noise.fbm(z * 0.01, x * 0.02, CONFIG.lodLevel) * 6;  // Increased from 3 to 6
+                        // Scale with LOD for more detailed terrain at higher settings
+                        const lodScale = Math.max(1, CONFIG.lodLevel / 6);
+                        const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 8));
+                        const detail = noise.fbm(z * 0.01, x * 0.02, octaves, 0.5, 2.0) * (4 * lodScale);
                         height = baseHeight + detail;
                         // Brown rock color
                         floorColors.push(0.4, 0.26, 0.13); // RGB for rock
@@ -1032,11 +1040,13 @@
         }
 
         function createRing(parent, zPosition, canyonCenterX) {
-            const ringGeo = new THREE.TorusGeometry(12, 1.0, 8, 24);  // Larger ring: radius 12, tube 1.0
+            const ringGeo = new THREE.TorusGeometry(12, 0.4, 8, 24);  // Thinner tube: 0.4 instead of 1.0
             const ringMat = new THREE.MeshPhongMaterial({
-                color: 0xFFD700,
-                emissive: 0x886600,
-                emissiveIntensity: 0.3
+                color: 0xFFFFFF,  // White
+                transparent: true,
+                opacity: 0.6,
+                emissive: 0xCCCCCC,
+                emissiveIntensity: 0.2
             });
 
             const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -1383,8 +1393,8 @@
                 const offsetY = aircraft.position.y - optimalPos.y;
 
                 // PD controller for horizontal (roll) control
-                const kP_roll = 0.02;
-                const kD_roll = 0.04;
+                const kP_roll = 0.025;
+                const kD_roll = 0.05;
                 const offsetRate = (offsetX - lastCanyonOffset) / delta;
                 const desiredRoll = -offsetX * kP_roll - offsetRate * kD_roll;
                 lastCanyonOffset = offsetX;
@@ -1394,17 +1404,25 @@
                 else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
                 else {
                     // Auto-roll towards optimal path with smooth interpolation
-                    const targetRoll = THREE.MathUtils.clamp(desiredRoll, -0.5, 0.5);
+                    const targetRoll = THREE.MathUtils.clamp(desiredRoll, -0.8, 0.8);  // Allow more aggressive roll
                     roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 4);
                 }
 
-                // Pitch control - move toward optimal altitude
+                // Pitch control - coordinated turn + altitude management
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                 else {
+                    // Coordinated turn: apply pitch proportional to roll for banking turns
+                    // When rolled, pitch up to execute the turn
+                    const turnPitch = -Math.abs(roll) * 0.25;  // Pull up when banked
+
                     // Auto-pitch to reach optimal altitude
                     const heightError = optimalPos.y - aircraft.position.y;
-                    const desiredPitch = THREE.MathUtils.clamp(heightError * 0.02, -0.15, 0.15);
+                    const altitudePitch = THREE.MathUtils.clamp(heightError * 0.015, -0.12, 0.12);
+
+                    // Combine turn pitch and altitude pitch
+                    const combinedPitch = turnPitch + altitudePitch;
+                    const desiredPitch = THREE.MathUtils.clamp(combinedPitch, -0.3, 0.3);
                     pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 3);
                 }
             } else {

@@ -1363,9 +1363,9 @@
             camera.position.z = aircraft.position.z + 25;
 
             // Look ahead in the direction the plane is facing
-            const lookAheadDistance = 50;
+            const cameraLookAhead = 50;
             const lookTarget = aircraft.position.clone();
-            lookTarget.z -= lookAheadDistance;
+            lookTarget.z -= cameraLookAhead;
 
             camera.lookAt(lookTarget);
         }

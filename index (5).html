@@ -250,6 +250,8 @@
         let enemies = [];
         let bullets = [];
         let enemyBullets = [];
+        let autopilotPathLine = null;
+        let canyonCenterLine = null;
 
         // Controls
         const keys = {};
@@ -561,6 +563,65 @@
                 const offset = sunVisual.userData.initialPosition;
                 sunVisual.position.copy(aircraft.position).add(offset);
             }
+        }
+
+        function updateDebugLines() {
+            if (!aircraft) return;
+
+            // Remove old lines
+            if (autopilotPathLine) {
+                scene.remove(autopilotPathLine);
+            }
+            if (canyonCenterLine) {
+                scene.remove(canyonCenterLine);
+            }
+
+            const lookAheadDistance = 150;
+            const targetHeight = 30;  // Autopilot target height
+
+            // Purple line: Autopilot's desired path (canyon center at target height)
+            const autopilotPoints = [];
+            const startZ = aircraft.position.z + 50;  // Start a bit behind
+            const endZ = aircraft.position.z - 800;   // Extend far ahead
+            const step = 10;
+
+            for (let z = startZ; z >= endZ; z -= step) {
+                const centerX = getCanyonCenter(z);
+                autopilotPoints.push(new THREE.Vector3(centerX, targetHeight, z));
+            }
+
+            const autopilotGeometry = new THREE.BufferGeometry().setFromPoints(autopilotPoints);
+            const autopilotMaterial = new THREE.LineDashedMaterial({
+                color: 0xFF00FF,      // Purple/magenta
+                linewidth: 5,
+                scale: 1,
+                dashSize: 5,
+                gapSize: 3
+            });
+
+            autopilotPathLine = new THREE.Line(autopilotGeometry, autopilotMaterial);
+            autopilotPathLine.computeLineDistances();
+            scene.add(autopilotPathLine);
+
+            // Green line: Canyon center at plane's current height
+            const canyonCenterPoints = [];
+            for (let z = startZ; z >= endZ; z -= step) {
+                const centerX = getCanyonCenter(z);
+                canyonCenterPoints.push(new THREE.Vector3(centerX, aircraft.position.y, z));
+            }
+
+            const canyonCenterGeometry = new THREE.BufferGeometry().setFromPoints(canyonCenterPoints);
+            const canyonCenterMaterial = new THREE.LineDashedMaterial({
+                color: 0x00FF00,      // Green
+                linewidth: 5,
+                scale: 1,
+                dashSize: 5,
+                gapSize: 3
+            });
+
+            canyonCenterLine = new THREE.Line(canyonCenterGeometry, canyonCenterMaterial);
+            canyonCenterLine.computeLineDistances();
+            scene.add(canyonCenterLine);
         }
 
         function createSimpleDeltaWing() {
@@ -1296,18 +1357,17 @@
 
             playerZ = aircraft.position.z;
 
-            // Update camera to follow aircraft
-            const lookAheadZ = aircraft.position.z - 50;
-            const lookAheadCenterX = getCanyonCenter(lookAheadZ);
-
-            camera.position.x = aircraft.position.x * 0.7 + canyonCenterX * 0.3;
+            // Update camera to follow aircraft (not canyon)
+            camera.position.x = aircraft.position.x;
             camera.position.y = aircraft.position.y + 5;
             camera.position.z = aircraft.position.z + 25;
-            camera.lookAt(
-                aircraft.position.x * 0.5 + lookAheadCenterX * 0.5,
-                aircraft.position.y,
-                lookAheadZ
-            );
+
+            // Look ahead in the direction the plane is facing
+            const lookAheadDistance = 50;
+            const lookTarget = aircraft.position.clone();
+            lookTarget.z -= lookAheadDistance;
+
+            camera.lookAt(lookTarget);
         }
 
         function updateCanyon() {
@@ -1424,6 +1484,7 @@
                 updateEnemies(delta);
                 updateBullets(delta);
                 updateLightingPosition();
+                updateDebugLines();
                 checkCollisions();
             }
 

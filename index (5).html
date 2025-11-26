@@ -381,40 +381,56 @@
             return base + variation;
         }
 
-        // Calculate optimal flight path that stays in middle third of canyon
+        // Calculate optimal flight path that takes the straightest safe route
         // Returns {x, y} position at given z
         function getOptimalFlightPath(z, currentX = 0) {
             const centerX = getCanyonCenter(z);
             const widthMultiplier = getCanyonWidthMultiplier(z);
             const canyonWidth = CONFIG.canyonWidth * widthMultiplier;
+            const halfWidth = canyonWidth / 2;
 
-            // Middle third boundaries (±1/6 of canyon width from center)
-            const middleThirdWidth = canyonWidth / 3;
-            const leftBound = centerX - middleThirdWidth / 2;
-            const rightBound = centerX + middleThirdWidth / 2;
+            // Account for plane wingspan when calculating safe bounds
+            const wingspan = 24;  // Half-wingspan
+            const safetyMargin = 10;  // Additional safety buffer
+            const requiredClearance = wingspan + safetyMargin;
 
-            // Try to stay as straight as possible (minimize X changes)
-            // But stay within middle third bounds
+            // Calculate safe flight corridor
+            const leftWall = centerX - halfWidth;
+            const rightWall = centerX + halfWidth;
+            const leftBound = leftWall + requiredClearance;
+            const rightBound = rightWall - requiredClearance;
+
+            // Straightest path strategy: minimize lateral movement
+            // Only deviate from current path when necessary for safety
             let targetX = currentX;
 
-            // If we're outside the middle third, move toward it
+            // Check if current position is safe
             if (currentX < leftBound) {
+                // Too close to left wall - must move right
                 targetX = leftBound;
             } else if (currentX > rightBound) {
+                // Too close to right wall - must move left
                 targetX = rightBound;
             } else {
-                // We're inside the middle third
-                // Try to move toward the canyon center for smoothest path
-                // but don't force it - only if it's closer
-                const toCenterDelta = centerX - currentX;
-                const moveTowardCenter = toCenterDelta * 0.1; // Gentle pull
-                targetX = currentX + moveTowardCenter;
+                // Current position is safe
+                // Prefer to continue straight, but gently drift toward center for optimal positioning
+                // This ensures we're centered for upcoming turns while minimizing unnecessary movement
+                const distToCenter = centerX - currentX;
 
-                // Make sure we stay in bounds
+                // Only move toward center if we're far from it
+                if (Math.abs(distToCenter) > 15) {
+                    // Gentle pull toward center (5% correction per step)
+                    targetX = currentX + distToCenter * 0.05;
+                } else {
+                    // Close enough to center - hold current position for straightest path
+                    targetX = currentX;
+                }
+
+                // Ensure we stay in safe bounds
                 targetX = Math.max(leftBound, Math.min(rightBound, targetX));
             }
 
-            // Target height: middle of flight envelope
+            // Target height: middle of flight envelope for maximum clearance
             const floorHeight = 8; // Safe floor height from collision detection
             const ceilingHeight = CONFIG.canyonHeight - 110; // Safe ceiling
             const targetY = (floorHeight + ceilingHeight) / 2; // Middle altitude
@@ -1408,25 +1424,69 @@
             const localX = playerPos.x - canyonCenterX;
             const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
 
-            // Wall collision - account for sloped walls
+            // Plane dimensions (F22 model scaled 4x, or fallback delta wing)
+            const fuselageRadius = 3;   // Tight around fuselage center
+            const wingspan = 24;         // Half-wingspan on each side (48 total)
+            const planeLength = 12;      // Front to back
+
+            // Calculate wingtip positions based on roll angle
+            // Wings extend along X-axis in local space
+            // When rolled, calculate actual wingtip positions in world space
+            const rollAngle = roll;  // Current roll angle
+
+            // Left wingtip offset (in world space)
+            const leftWingtipX = playerPos.x - Math.cos(rollAngle) * wingspan;
+            const leftWingtipY = playerPos.y - Math.sin(rollAngle) * wingspan;
+
+            // Right wingtip offset (in world space)
+            const rightWingtipX = playerPos.x + Math.cos(rollAngle) * wingspan;
+            const rightWingtipY = playerPos.y + Math.sin(rollAngle) * wingspan;
+
+            // Wall collision - check fuselage and both wingtips
             const yFrac = playerPos.y / rimHeight;
             const baseAngle = 0.15 + crossSection * 0.6;
-            const effectiveHalfWidth = halfWidth - (1 - yFrac) * halfWidth * (1 - baseAngle) - 8;
+            const effectiveHalfWidth = halfWidth - (1 - yFrac) * halfWidth * (1 - baseAngle);
 
-            if (Math.abs(localX) > effectiveHalfWidth) {
+            // Check fuselage collision (tight box)
+            if (Math.abs(localX) > effectiveHalfWidth - fuselageRadius) {
+                triggerDeath();
+                return;
+            }
+
+            // Check left wingtip collision
+            const leftWingtipLocalX = leftWingtipX - canyonCenterX;
+            const leftWingtipYFrac = leftWingtipY / rimHeight;
+            const leftWingtipEffectiveWidth = halfWidth - (1 - leftWingtipYFrac) * halfWidth * (1 - baseAngle);
+            if (Math.abs(leftWingtipLocalX) > leftWingtipEffectiveWidth - 2) {
+                triggerDeath();
+                return;
+            }
+
+            // Check right wingtip collision
+            const rightWingtipLocalX = rightWingtipX - canyonCenterX;
+            const rightWingtipYFrac = rightWingtipY / rimHeight;
+            const rightWingtipEffectiveWidth = halfWidth - (1 - rightWingtipYFrac) * halfWidth * (1 - baseAngle);
+            if (Math.abs(rightWingtipLocalX) > rightWingtipEffectiveWidth - 2) {
                 triggerDeath();
                 return;
             }
 
             // Floor collision - account for V/U shape and raised river
+            // Use tight collision for fuselage bottom
             const distFromCenter = Math.abs(localX) / halfWidth;
             const uShapeFloor = Math.pow(distFromCenter, 0.5) * 8;
             const vShapeFloor = distFromCenter * 15;
             const baseFloorHeight = vShapeFloor * (1 - crossSection) + uShapeFloor * crossSection;
-            // River is at level 2, add safety margin
-            const floorHeight = Math.max(baseFloorHeight, 2) + 5;
+            // River is at level 2, add tighter safety margin
+            const floorHeight = Math.max(baseFloorHeight, 2) + 3;  // Tighter: 3 instead of 5
 
             if (playerPos.y < floorHeight) {
+                triggerDeath();
+                return;
+            }
+
+            // Check if wingtips hit floor (when rolled)
+            if (leftWingtipY < 2 || rightWingtipY < 2) {
                 triggerDeath();
                 return;
             }
@@ -1502,42 +1562,89 @@
                 // Get optimal path position at look-ahead point
                 const optimalPos = getOptimalFlightPath(targetZ, aircraft.position.x);
 
+                // Get canyon boundaries for wall awareness
+                const canyonCenterX = getCanyonCenter(targetZ);
+                const widthMultiplier = getCanyonWidthMultiplier(targetZ);
+                const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
+                const leftWall = canyonCenterX - halfWidth;
+                const rightWall = canyonCenterX + halfWidth;
+
                 // Calculate offsets from optimal path
                 const offsetX = aircraft.position.x - optimalPos.x;
                 const offsetY = aircraft.position.y - optimalPos.y;
 
-                // PD controller for horizontal (roll) control
-                const kP_roll = 0.025;
-                const kD_roll = 0.05;
-                const offsetRate = (offsetX - lastCanyonOffset) / delta;
-                const desiredRoll = -offsetX * kP_roll - offsetRate * kD_roll;
-                lastCanyonOffset = offsetX;
+                // Check distance to walls for emergency avoidance
+                const distToLeftWall = aircraft.position.x - leftWall;
+                const distToRightWall = rightWall - aircraft.position.x;
+                const safeDistance = 25; // Trigger avoidance when within 25 units of wall
 
-                // User input modifies roll
-                if (keys['a']) roll = Math.max(roll - 2 * delta, -1.0);
-                else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
+                // User input modifies roll (2x faster: 4 instead of 2)
+                if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);  // 120 degrees
+                else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);   // 120 degrees
                 else {
-                    // Auto-roll towards optimal path with smooth interpolation
-                    const targetRoll = THREE.MathUtils.clamp(desiredRoll, -0.8, 0.8);  // Allow more aggressive roll
-                    roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 4);
+                    // Determine desired roll based on situation
+                    let targetRoll = 0;
+
+                    // Plane dimensions for wingtip clearance
+                    const wingspan = 24;  // Half-wingspan
+                    const wingClearance = 8;  // Extra clearance needed
+
+                    // Calculate required clearance for different roll angles
+                    // At 0 degrees (level): need full wingspan clearance horizontally
+                    // At 90 degrees (knife-edge): need minimal horizontal clearance
+                    const levelWingspan = wingspan + wingClearance;
+
+                    // Check if we need to roll to fit through narrow section
+                    const availableWidth = Math.min(distToLeftWall, distToRightWall);
+                    const needsKnifeEdge = availableWidth < levelWingspan;
+
+                    // Emergency wall avoidance - takes priority
+                    if (distToLeftWall < safeDistance) {
+                        // Too close to left wall
+                        if (needsKnifeEdge) {
+                            // Roll to knife-edge to reduce horizontal profile
+                            targetRoll = Math.PI / 2;  // 90 degrees (vertical)
+                        } else {
+                            // Roll right to move away from wall
+                            targetRoll = Math.PI / 2;  // 90 degrees right
+                        }
+                    } else if (distToRightWall < safeDistance) {
+                        // Too close to right wall
+                        if (needsKnifeEdge) {
+                            // Roll to knife-edge to reduce horizontal profile
+                            targetRoll = Math.PI / 2;  // 90 degrees (vertical)
+                        } else {
+                            // Roll left to move away from wall
+                            targetRoll = -Math.PI / 2;  // 90 degrees left
+                        }
+                    } else {
+                        // Normal path following
+                        // Check if canyon ahead is narrow
+                        if (needsKnifeEdge) {
+                            // Canyon is narrow - go knife-edge (90 degrees)
+                            targetRoll = Math.PI / 2;
+                        } else if (Math.abs(offsetX) > 10) {
+                            // Large offset - use 90-degree bank for efficient turn
+                            targetRoll = offsetX > 0 ? -Math.PI / 2 : Math.PI / 2;
+                        } else if (Math.abs(offsetX) > 2) {
+                            // Medium offset - use proportional roll
+                            targetRoll = THREE.MathUtils.clamp(-offsetX * 0.05, -1.5, 1.5);
+                        } else {
+                            // Small offset - level out for stability
+                            targetRoll = 0;
+                        }
+                    }
+
+                    roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5);
                 }
 
-                // Pitch control - coordinated turn + altitude management
+                // Pitch control - COMPLETELY SEPARATE from roll
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                 else {
-                    // Coordinated turn: apply pitch proportional to roll for banking turns
-                    // When rolled, pitch up to execute the turn
-                    // Increased from 0.25 to 0.5 for more aggressive turns
-                    const turnPitch = Math.abs(roll) * 0.5;  // Pull up when banked
-
-                    // Auto-pitch to reach optimal altitude
+                    // Auto-pitch ONLY for altitude management (no turn coupling)
                     const heightError = optimalPos.y - aircraft.position.y;
-                    const altitudePitch = THREE.MathUtils.clamp(heightError * 0.015, -0.12, 0.12);
-
-                    // Combine turn pitch and altitude pitch
-                    const combinedPitch = turnPitch + altitudePitch;
-                    const desiredPitch = THREE.MathUtils.clamp(combinedPitch, -0.5, 0.5);
+                    const desiredPitch = THREE.MathUtils.clamp(heightError * 0.02, -0.3, 0.3);
                     pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 3);
                 }
             } else {
@@ -1546,12 +1653,12 @@
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                 else pitch *= 0.95;  // Decay pitch when not actively controlling
 
-                if (keys['a']) roll = Math.max(roll - 2 * delta, -1.0);
-                else if (keys['d']) roll = Math.min(roll + 2 * delta, 1.0);
+                // 2x faster roll: 4 instead of 2, 120-degree limit: 2.1 instead of 1.0
+                if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
+                else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
                 else roll *= 0.95;  // Decay roll when not actively controlling
 
                 // Don't accumulate yaw - it causes spinning
-                // Instead, yaw should be controlled separately if needed
                 yaw *= 0.98;  // Slowly decay yaw
             }
 

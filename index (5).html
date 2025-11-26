@@ -1529,7 +1529,7 @@
                     // Coordinated turn: apply pitch proportional to roll for banking turns
                     // When rolled, pitch up to execute the turn
                     // Increased from 0.25 to 0.5 for more aggressive turns
-                    const turnPitch = -Math.abs(roll) * 0.5;  // Pull up when banked
+                    const turnPitch = Math.abs(roll) * 0.5;  // Pull up when banked
 
                     // Auto-pitch to reach optimal altitude
                     const heightError = optimalPos.y - aircraft.position.y;

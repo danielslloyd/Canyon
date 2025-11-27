@@ -264,8 +264,6 @@
         let enemyBullets = [];
         let autopilotPathLine = null;
         let canyonCenterLine = null;
-        let optimalPathLine = null;
-        let racingLine = null;
         let debugPitchCircle = null;
         let debugRollCircle = null;
         let debugTravelArrow = null;
@@ -384,131 +382,18 @@
             return base + variation;
         }
 
-        // Calculate smooth racing line through the canyon
-        // Uses maximum turning radius approach similar to racing lines
-        // Returns array of {x, y, z} points
-        function calculateRacingLine(startZ, endZ, currentX, currentY) {
-            const points = [];
-            const step = 10;
-            const lookahead = 100;  // How far ahead to look for turn planning
-
-            let x = currentX;
-            let y = currentY;
-
-            for (let z = startZ; z >= endZ; z -= step) {
-                // Look ahead to see if a turn is coming
-                const futureZ = z - lookahead;
-                const currentCenter = getCanyonCenter(z);
-                const futureCenter = getCanyonCenter(futureZ);
-                const turnDelta = futureCenter - currentCenter;
-
-                // Get canyon dimensions
-                const widthMultiplier = getCanyonWidthMultiplier(z);
-                const canyonWidth = CONFIG.canyonWidth * widthMultiplier;
-                const halfWidth = canyonWidth / 2;
-
-                // Safety margins
-                const wingspan = 24;
-                const safetyMargin = 10;
-                const requiredClearance = wingspan + safetyMargin;
-
-                // Calculate safe bounds
-                const leftWall = currentCenter - halfWidth;
-                const rightWall = currentCenter + halfWidth;
-                const leftBound = leftWall + requiredClearance;
-                const rightBound = rightWall - requiredClearance;
-
-                // Racing line logic: position for optimal turn entry/exit
-                let targetX;
-
-                if (Math.abs(turnDelta) > 20) {
-                    // Significant turn ahead - take racing line
-                    if (turnDelta > 0) {
-                        // Turn is going right - position to the left for wider arc
-                        targetX = leftBound + (rightBound - leftBound) * 0.25;
-                    } else {
-                        // Turn is going left - position to the right for wider arc
-                        targetX = leftBound + (rightBound - leftBound) * 0.75;
-                    }
-                } else {
-                    // Straight section or gentle curve - stay near center
-                    const centerBias = 0.5;
-                    targetX = leftBound + (rightBound - leftBound) * centerBias;
-                }
-
-                // Smooth interpolation to target position
-                const smoothing = 0.15;  // Higher = more aggressive, lower = smoother
-                x = x + (targetX - x) * smoothing;
-
-                // Clamp to safe bounds
-                x = Math.max(leftBound, Math.min(rightBound, x));
-
-                // Target height: middle of flight envelope
-                const floorHeight = 8;
-                const ceilingHeight = CONFIG.canyonHeight - 110;
-                const targetY = (floorHeight + ceilingHeight) / 2;
-                y = y + (targetY - y) * smoothing;
-
-                points.push(new THREE.Vector3(x, y, z));
-            }
-
-            return points;
-        }
-
-        // Calculate optimal flight path using racing line logic
+        // Calculate optimal flight path - simply follow canyon center (green line)
         // Returns {x, y} position at given z
         function getOptimalFlightPath(z, currentX = 0) {
-            const lookahead = 100;  // How far ahead to look for turn planning
-
-            // Look ahead to see if a turn is coming
-            const futureZ = z - lookahead;
-            const currentCenter = getCanyonCenter(z);
-            const futureCenter = getCanyonCenter(futureZ);
-            const turnDelta = futureCenter - currentCenter;
-
-            // Get canyon dimensions
-            const widthMultiplier = getCanyonWidthMultiplier(z);
-            const canyonWidth = CONFIG.canyonWidth * widthMultiplier;
-            const halfWidth = canyonWidth / 2;
-
-            // Safety margins
-            const wingspan = 24;  // Half-wingspan
-            const safetyMargin = 10;  // Additional safety buffer
-            const requiredClearance = wingspan + safetyMargin;
-
-            // Calculate safe bounds
-            const leftWall = currentCenter - halfWidth;
-            const rightWall = currentCenter + halfWidth;
-            const leftBound = leftWall + requiredClearance;
-            const rightBound = rightWall - requiredClearance;
-
-            // Racing line logic: position for optimal turn entry/exit
-            let targetX;
-
-            if (Math.abs(turnDelta) > 20) {
-                // Significant turn ahead - take racing line
-                if (turnDelta > 0) {
-                    // Turn is going right - position to the left for wider arc
-                    targetX = leftBound + (rightBound - leftBound) * 0.25;
-                } else {
-                    // Turn is going left - position to the right for wider arc
-                    targetX = leftBound + (rightBound - leftBound) * 0.75;
-                }
-            } else {
-                // Straight section or gentle curve - stay near center
-                const centerBias = 0.5;
-                targetX = leftBound + (rightBound - leftBound) * centerBias;
-            }
-
-            // Clamp to safe bounds
-            targetX = Math.max(leftBound, Math.min(rightBound, targetX));
+            // Simply follow the canyon center
+            const centerX = getCanyonCenter(z);
 
             // Target height: middle of flight envelope for maximum clearance
             const floorHeight = 8; // Safe floor height from collision detection
             const ceilingHeight = CONFIG.canyonHeight - 110; // Safe ceiling
             const targetY = (floorHeight + ceilingHeight) / 2; // Middle altitude
 
-            return { x: targetX, y: targetY };
+            return { x: centerX, y: targetY };
         }
 
         // Initialize the game
@@ -833,20 +718,18 @@
                 debugWingtipMarkers = [];
             }
 
-            // Plane dimensions
+            // Plane dimensions (matching F22 model scaled 4x)
             const fuselageRadius = 3;
-            const wingspan = 24;
+            const wingspan = 8;  // Half-wingspan (reduced from 24)
             const planeLength = 12;
+            const planeHeight = 4;
             const rollAngle = roll;
 
-            // Create fuselage collision box (cylinder oriented along Z-axis)
-            const fuselageGeometry = new THREE.CylinderGeometry(
-                fuselageRadius,
-                fuselageRadius,
-                planeLength,
-                8,
-                1,
-                true
+            // Create fuselage collision box (rectangular bounding box)
+            const fuselageGeometry = new THREE.BoxGeometry(
+                planeHeight,     // Width (X)
+                planeHeight,     // Height (Y)
+                planeLength      // Length (Z)
             );
             const fuselageMaterial = new THREE.MeshBasicMaterial({
                 color: 0xFFFF00,  // Yellow
@@ -856,8 +739,7 @@
             });
             const fuselageBox = new THREE.Mesh(fuselageGeometry, fuselageMaterial);
 
-            // Rotate cylinder to align with plane's forward direction (Z-axis)
-            fuselageBox.rotation.x = Math.PI / 2;
+            // Position and orient with the plane
             fuselageBox.position.copy(aircraft.position);
             fuselageBox.quaternion.copy(aircraft.quaternion);
 
@@ -867,9 +749,10 @@
             // Add wingtip markers
             debugWingtipMarkers = [];
 
-            // Left wingtip
-            const leftWingtipX = aircraft.position.x - Math.cos(rollAngle) * wingspan;
-            const leftWingtipY = aircraft.position.y - Math.sin(rollAngle) * wingspan;
+            // Left wingtip - wings extend in local X direction
+            // When rolled, wingtips rotate in XY plane
+            const leftWingtipX = aircraft.position.x + Math.cos(rollAngle) * wingspan;
+            const leftWingtipY = aircraft.position.y + Math.sin(rollAngle) * wingspan;
             const leftWingtipZ = aircraft.position.z;
 
             const leftMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
@@ -885,8 +768,8 @@
             scene.add(leftMarker);
 
             // Right wingtip
-            const rightWingtipX = aircraft.position.x + Math.cos(rollAngle) * wingspan;
-            const rightWingtipY = aircraft.position.y + Math.sin(rollAngle) * wingspan;
+            const rightWingtipX = aircraft.position.x - Math.cos(rollAngle) * wingspan;
+            const rightWingtipY = aircraft.position.y - Math.sin(rollAngle) * wingspan;
             const rightWingtipZ = aircraft.position.z;
 
             const rightMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
@@ -913,9 +796,6 @@
             }
             if (canyonCenterLine) {
                 scene.remove(canyonCenterLine);
-            }
-            if (optimalPathLine) {
-                scene.remove(optimalPathLine);
             }
 
             const startZ = aircraft.position.z + 50;  // Start a bit behind
@@ -962,51 +842,6 @@
             canyonCenterLine = new THREE.Line(canyonCenterGeometry, canyonCenterMaterial);
             canyonCenterLine.computeLineDistances();
             scene.add(canyonCenterLine);
-
-            // Blue line: Optimal flight path (straightest path in middle third)
-            const optimalPathPoints = [];
-            let currentX = aircraft.position.x;
-            for (let z = startZ; z >= endZ; z -= step) {
-                const optimalPos = getOptimalFlightPath(z, currentX);
-                optimalPathPoints.push(new THREE.Vector3(optimalPos.x, optimalPos.y, z));
-                currentX = optimalPos.x; // Track for next iteration
-            }
-
-            const optimalGeometry = new THREE.BufferGeometry().setFromPoints(optimalPathPoints);
-            const optimalMaterial = new THREE.LineDashedMaterial({
-                color: 0x0088FF,      // Blue
-                linewidth: 5,
-                scale: 1,
-                dashSize: 5,
-                gapSize: 3
-            });
-
-            optimalPathLine = new THREE.Line(optimalGeometry, optimalMaterial);
-            optimalPathLine.computeLineDistances();
-            scene.add(optimalPathLine);
-
-            // Orange/Gold line: Racing line (smooth path with maximum turning radius)
-            if (racingLine) {
-                scene.remove(racingLine);
-            }
-
-            const racingLinePoints = calculateRacingLine(
-                startZ,
-                endZ,
-                aircraft.position.x,
-                aircraft.position.y
-            );
-
-            const racingGeometry = new THREE.BufferGeometry().setFromPoints(racingLinePoints);
-            const racingMaterial = new THREE.LineBasicMaterial({
-                color: 0xFFA500,      // Orange
-                linewidth: 8,
-                transparent: true,
-                opacity: 0.9
-            });
-
-            racingLine = new THREE.Line(racingGeometry, racingMaterial);
-            scene.add(racingLine);
         }
 
         function createSimpleDeltaWing() {
@@ -1605,7 +1440,7 @@
 
             // Plane dimensions (F22 model scaled 4x, or fallback delta wing)
             const fuselageRadius = 3;   // Tight around fuselage center
-            const wingspan = 24;         // Half-wingspan on each side (48 total)
+            const wingspan = 8;          // Half-wingspan on each side (16 total)
             const planeLength = 12;      // Front to back
 
             // Calculate wingtip positions based on roll angle
@@ -1614,12 +1449,12 @@
             const rollAngle = roll;  // Current roll angle
 
             // Left wingtip offset (in world space)
-            const leftWingtipX = playerPos.x - Math.cos(rollAngle) * wingspan;
-            const leftWingtipY = playerPos.y - Math.sin(rollAngle) * wingspan;
+            const leftWingtipX = playerPos.x + Math.cos(rollAngle) * wingspan;
+            const leftWingtipY = playerPos.y + Math.sin(rollAngle) * wingspan;
 
             // Right wingtip offset (in world space)
-            const rightWingtipX = playerPos.x + Math.cos(rollAngle) * wingspan;
-            const rightWingtipY = playerPos.y + Math.sin(rollAngle) * wingspan;
+            const rightWingtipX = playerPos.x - Math.cos(rollAngle) * wingspan;
+            const rightWingtipY = playerPos.y - Math.sin(rollAngle) * wingspan;
 
             // Wall collision - check fuselage and both wingtips
             const yFrac = playerPos.y / rimHeight;
@@ -1765,7 +1600,7 @@
                     let targetRoll = 0;
 
                     // Plane dimensions for wingtip clearance
-                    const wingspan = 24;  // Half-wingspan
+                    const wingspan = 8;  // Half-wingspan
                     const wingClearance = 8;  // Extra clearance needed
 
                     // Calculate required clearance for different roll angles

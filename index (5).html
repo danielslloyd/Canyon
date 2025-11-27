@@ -271,6 +271,14 @@
         let debugCollisionBox = null;
         let debugWingtipMarkers = null;
 
+        // Plane dimensions - will be calculated from F22 model
+        let PLANE_DIMS = {
+            wingspan: 8,      // Half-wingspan (from center to tip)
+            length: 12,       // Nose to tail
+            height: 4,        // Bottom to top
+            fuselageRadius: 3 // Collision radius for fuselage
+        };
+
         // Controls
         const keys = {};
         let pitch = 0;
@@ -718,18 +726,11 @@
                 debugWingtipMarkers = [];
             }
 
-            // Plane dimensions (matching F22 model scaled 4x)
-            const fuselageRadius = 3;
-            const wingspan = 8;  // Half-wingspan (reduced from 24)
-            const planeLength = 12;
-            const planeHeight = 4;
-            const rollAngle = roll;
-
-            // Create fuselage collision box (rectangular bounding box)
+            // Create fuselage collision box using calculated dimensions
             const fuselageGeometry = new THREE.BoxGeometry(
-                planeHeight,     // Width (X)
-                planeHeight,     // Height (Y)
-                planeLength      // Length (Z)
+                PLANE_DIMS.height,     // Width (X)
+                PLANE_DIMS.height,     // Height (Y)
+                PLANE_DIMS.length      // Length (Z)
             );
             const fuselageMaterial = new THREE.MeshBasicMaterial({
                 color: 0xFFFF00,  // Yellow
@@ -746,14 +747,14 @@
             debugCollisionBox = new THREE.Group();
             debugCollisionBox.add(fuselageBox);
 
-            // Add wingtip markers
+            // Add wingtip markers using proper quaternion transformation
             debugWingtipMarkers = [];
 
-            // Left wingtip - wings extend in local X direction
-            // When rolled, wingtips rotate in XY plane
-            const leftWingtipX = aircraft.position.x + Math.cos(rollAngle) * wingspan;
-            const leftWingtipY = aircraft.position.y + Math.sin(rollAngle) * wingspan;
-            const leftWingtipZ = aircraft.position.z;
+            // Left wingtip in local coordinates (positive X direction)
+            const leftLocalPos = new THREE.Vector3(PLANE_DIMS.wingspan, 0, 0);
+            // Transform to world coordinates using aircraft quaternion
+            leftLocalPos.applyQuaternion(aircraft.quaternion);
+            const leftWingtip = aircraft.position.clone().add(leftLocalPos);
 
             const leftMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
             const leftMarkerMat = new THREE.MeshBasicMaterial({
@@ -763,14 +764,15 @@
                 opacity: 0.8
             });
             const leftMarker = new THREE.Mesh(leftMarkerGeo, leftMarkerMat);
-            leftMarker.position.set(leftWingtipX, leftWingtipY, leftWingtipZ);
+            leftMarker.position.copy(leftWingtip);
             debugWingtipMarkers.push(leftMarker);
             scene.add(leftMarker);
 
-            // Right wingtip
-            const rightWingtipX = aircraft.position.x - Math.cos(rollAngle) * wingspan;
-            const rightWingtipY = aircraft.position.y - Math.sin(rollAngle) * wingspan;
-            const rightWingtipZ = aircraft.position.z;
+            // Right wingtip in local coordinates (negative X direction)
+            const rightLocalPos = new THREE.Vector3(-PLANE_DIMS.wingspan, 0, 0);
+            // Transform to world coordinates using aircraft quaternion
+            rightLocalPos.applyQuaternion(aircraft.quaternion);
+            const rightWingtip = aircraft.position.clone().add(rightLocalPos);
 
             const rightMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
             const rightMarkerMat = new THREE.MeshBasicMaterial({
@@ -780,7 +782,7 @@
                 opacity: 0.8
             });
             const rightMarker = new THREE.Mesh(rightMarkerGeo, rightMarkerMat);
-            rightMarker.position.set(rightWingtipX, rightWingtipY, rightWingtipZ);
+            rightMarker.position.copy(rightWingtip);
             debugWingtipMarkers.push(rightMarker);
             scene.add(rightMarker);
 
@@ -942,8 +944,30 @@
                     model.rotation.y = -Math.PI / 2;
 
                     aircraftGroup.add(model);
-                    modelLoaded = true;
+
+                    // Calculate bounding box from loaded model
+                    aircraftGroup.updateMatrixWorld(true);  // Force update before measuring
+                    const box = new THREE.Box3().setFromObject(aircraftGroup);
+                    const size = new THREE.Vector3();
+                    box.getSize(size);
+
+                    PLANE_DIMS = {
+                        wingspan: size.x / 2,        // Half of full width
+                        length: size.z,              // Full length
+                        height: size.y,              // Full height
+                        fuselageRadius: Math.min(size.x, size.y) / 3  // Conservative fuselage radius
+                    };
+
                     console.log('✅ F22 model loaded successfully from:', path);
+                    console.log('📏 F22 Bounding Box:', {
+                        fullWidth: size.x.toFixed(2),
+                        halfWingspan: PLANE_DIMS.wingspan.toFixed(2),
+                        length: PLANE_DIMS.length.toFixed(2),
+                        height: PLANE_DIMS.height.toFixed(2),
+                        fuselageRadius: PLANE_DIMS.fuselageRadius.toFixed(2)
+                    });
+
+                    modelLoaded = true;
                     break;
                 } catch (error) {
                     console.log('❌ Failed to load from', path, ':', error.message);
@@ -1438,23 +1462,21 @@
             const localX = playerPos.x - canyonCenterX;
             const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
 
-            // Plane dimensions (F22 model scaled 4x, or fallback delta wing)
-            const fuselageRadius = 3;   // Tight around fuselage center
-            const wingspan = 8;          // Half-wingspan on each side (16 total)
-            const planeLength = 12;      // Front to back
+            // Calculate wingtip positions using proper quaternion transformation
+            // Left wingtip in local coordinates (positive X direction)
+            const leftLocalPos = new THREE.Vector3(PLANE_DIMS.wingspan, 0, 0);
+            leftLocalPos.applyQuaternion(aircraft.quaternion);
+            const leftWingtip = playerPos.clone().add(leftLocalPos);
 
-            // Calculate wingtip positions based on roll angle
-            // Wings extend along X-axis in local space
-            // When rolled, calculate actual wingtip positions in world space
-            const rollAngle = roll;  // Current roll angle
+            // Right wingtip in local coordinates (negative X direction)
+            const rightLocalPos = new THREE.Vector3(-PLANE_DIMS.wingspan, 0, 0);
+            rightLocalPos.applyQuaternion(aircraft.quaternion);
+            const rightWingtip = playerPos.clone().add(rightLocalPos);
 
-            // Left wingtip offset (in world space)
-            const leftWingtipX = playerPos.x + Math.cos(rollAngle) * wingspan;
-            const leftWingtipY = playerPos.y + Math.sin(rollAngle) * wingspan;
-
-            // Right wingtip offset (in world space)
-            const rightWingtipX = playerPos.x - Math.cos(rollAngle) * wingspan;
-            const rightWingtipY = playerPos.y - Math.sin(rollAngle) * wingspan;
+            const leftWingtipX = leftWingtip.x;
+            const leftWingtipY = leftWingtip.y;
+            const rightWingtipX = rightWingtip.x;
+            const rightWingtipY = rightWingtip.y;
 
             // Wall collision - check fuselage and both wingtips
             const yFrac = playerPos.y / rimHeight;
@@ -1462,7 +1484,7 @@
             const effectiveHalfWidth = halfWidth - (1 - yFrac) * halfWidth * (1 - baseAngle);
 
             // Check fuselage collision (tight box)
-            if (Math.abs(localX) > effectiveHalfWidth - fuselageRadius) {
+            if (Math.abs(localX) > effectiveHalfWidth - PLANE_DIMS.fuselageRadius) {
                 triggerDeath();
                 return;
             }
@@ -1600,7 +1622,7 @@
                     let targetRoll = 0;
 
                     // Plane dimensions for wingtip clearance
-                    const wingspan = 8;  // Half-wingspan
+                    const wingspan = PLANE_DIMS.wingspan;  // Half-wingspan from model
                     const wingClearance = 8;  // Extra clearance needed
 
                     // Calculate required clearance for different roll angles
@@ -1658,8 +1680,9 @@
                 else {
                     // Auto-pitch ONLY for altitude management (no turn coupling)
                     const heightError = optimalPos.y - aircraft.position.y;
-                    const desiredPitch = THREE.MathUtils.clamp(heightError * 0.02, -0.3, 0.3);
-                    pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 3);
+                    // Increased gain from 0.02 to 0.05 for more responsive altitude control
+                    const desiredPitch = THREE.MathUtils.clamp(heightError * 0.05, -0.5, 0.5);
+                    pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 5);  // Faster response: 5 instead of 3
                 }
             } else {
                 // Manual control without stabilization

@@ -265,10 +265,13 @@
         let autopilotPathLine = null;
         let canyonCenterLine = null;
         let optimalPathLine = null;
+        let racingLine = null;
         let debugPitchCircle = null;
         let debugRollCircle = null;
         let debugTravelArrow = null;
         let debugNoseArrow = null;
+        let debugCollisionBox = null;
+        let debugWingtipMarkers = null;
 
         // Controls
         const keys = {};
@@ -381,54 +384,124 @@
             return base + variation;
         }
 
-        // Calculate optimal flight path that takes the straightest safe route
+        // Calculate smooth racing line through the canyon
+        // Uses maximum turning radius approach similar to racing lines
+        // Returns array of {x, y, z} points
+        function calculateRacingLine(startZ, endZ, currentX, currentY) {
+            const points = [];
+            const step = 10;
+            const lookahead = 100;  // How far ahead to look for turn planning
+
+            let x = currentX;
+            let y = currentY;
+
+            for (let z = startZ; z >= endZ; z -= step) {
+                // Look ahead to see if a turn is coming
+                const futureZ = z - lookahead;
+                const currentCenter = getCanyonCenter(z);
+                const futureCenter = getCanyonCenter(futureZ);
+                const turnDelta = futureCenter - currentCenter;
+
+                // Get canyon dimensions
+                const widthMultiplier = getCanyonWidthMultiplier(z);
+                const canyonWidth = CONFIG.canyonWidth * widthMultiplier;
+                const halfWidth = canyonWidth / 2;
+
+                // Safety margins
+                const wingspan = 24;
+                const safetyMargin = 10;
+                const requiredClearance = wingspan + safetyMargin;
+
+                // Calculate safe bounds
+                const leftWall = currentCenter - halfWidth;
+                const rightWall = currentCenter + halfWidth;
+                const leftBound = leftWall + requiredClearance;
+                const rightBound = rightWall - requiredClearance;
+
+                // Racing line logic: position for optimal turn entry/exit
+                let targetX;
+
+                if (Math.abs(turnDelta) > 20) {
+                    // Significant turn ahead - take racing line
+                    if (turnDelta > 0) {
+                        // Turn is going right - position to the left for wider arc
+                        targetX = leftBound + (rightBound - leftBound) * 0.25;
+                    } else {
+                        // Turn is going left - position to the right for wider arc
+                        targetX = leftBound + (rightBound - leftBound) * 0.75;
+                    }
+                } else {
+                    // Straight section or gentle curve - stay near center
+                    const centerBias = 0.5;
+                    targetX = leftBound + (rightBound - leftBound) * centerBias;
+                }
+
+                // Smooth interpolation to target position
+                const smoothing = 0.15;  // Higher = more aggressive, lower = smoother
+                x = x + (targetX - x) * smoothing;
+
+                // Clamp to safe bounds
+                x = Math.max(leftBound, Math.min(rightBound, x));
+
+                // Target height: middle of flight envelope
+                const floorHeight = 8;
+                const ceilingHeight = CONFIG.canyonHeight - 110;
+                const targetY = (floorHeight + ceilingHeight) / 2;
+                y = y + (targetY - y) * smoothing;
+
+                points.push(new THREE.Vector3(x, y, z));
+            }
+
+            return points;
+        }
+
+        // Calculate optimal flight path using racing line logic
         // Returns {x, y} position at given z
         function getOptimalFlightPath(z, currentX = 0) {
-            const centerX = getCanyonCenter(z);
+            const lookahead = 100;  // How far ahead to look for turn planning
+
+            // Look ahead to see if a turn is coming
+            const futureZ = z - lookahead;
+            const currentCenter = getCanyonCenter(z);
+            const futureCenter = getCanyonCenter(futureZ);
+            const turnDelta = futureCenter - currentCenter;
+
+            // Get canyon dimensions
             const widthMultiplier = getCanyonWidthMultiplier(z);
             const canyonWidth = CONFIG.canyonWidth * widthMultiplier;
             const halfWidth = canyonWidth / 2;
 
-            // Account for plane wingspan when calculating safe bounds
+            // Safety margins
             const wingspan = 24;  // Half-wingspan
             const safetyMargin = 10;  // Additional safety buffer
             const requiredClearance = wingspan + safetyMargin;
 
-            // Calculate safe flight corridor
-            const leftWall = centerX - halfWidth;
-            const rightWall = centerX + halfWidth;
+            // Calculate safe bounds
+            const leftWall = currentCenter - halfWidth;
+            const rightWall = currentCenter + halfWidth;
             const leftBound = leftWall + requiredClearance;
             const rightBound = rightWall - requiredClearance;
 
-            // Straightest path strategy: minimize lateral movement
-            // Only deviate from current path when necessary for safety
-            let targetX = currentX;
+            // Racing line logic: position for optimal turn entry/exit
+            let targetX;
 
-            // Check if current position is safe
-            if (currentX < leftBound) {
-                // Too close to left wall - must move right
-                targetX = leftBound;
-            } else if (currentX > rightBound) {
-                // Too close to right wall - must move left
-                targetX = rightBound;
-            } else {
-                // Current position is safe
-                // Prefer to continue straight, but gently drift toward center for optimal positioning
-                // This ensures we're centered for upcoming turns while minimizing unnecessary movement
-                const distToCenter = centerX - currentX;
-
-                // Only move toward center if we're far from it
-                if (Math.abs(distToCenter) > 15) {
-                    // Gentle pull toward center (5% correction per step)
-                    targetX = currentX + distToCenter * 0.05;
+            if (Math.abs(turnDelta) > 20) {
+                // Significant turn ahead - take racing line
+                if (turnDelta > 0) {
+                    // Turn is going right - position to the left for wider arc
+                    targetX = leftBound + (rightBound - leftBound) * 0.25;
                 } else {
-                    // Close enough to center - hold current position for straightest path
-                    targetX = currentX;
+                    // Turn is going left - position to the right for wider arc
+                    targetX = leftBound + (rightBound - leftBound) * 0.75;
                 }
-
-                // Ensure we stay in safe bounds
-                targetX = Math.max(leftBound, Math.min(rightBound, targetX));
+            } else {
+                // Straight section or gentle curve - stay near center
+                const centerBias = 0.5;
+                targetX = leftBound + (rightBound - leftBound) * centerBias;
             }
+
+            // Clamp to safe bounds
+            targetX = Math.max(leftBound, Math.min(rightBound, targetX));
 
             // Target height: middle of flight envelope for maximum clearance
             const floorHeight = 8; // Safe floor height from collision detection
@@ -748,6 +821,89 @@
             scene.add(debugRollCircle);
         }
 
+        function updateCollisionBoxDebug() {
+            if (!aircraft) return;
+
+            // Remove old debug meshes
+            if (debugCollisionBox) {
+                scene.remove(debugCollisionBox);
+            }
+            if (debugWingtipMarkers) {
+                debugWingtipMarkers.forEach(marker => scene.remove(marker));
+                debugWingtipMarkers = [];
+            }
+
+            // Plane dimensions
+            const fuselageRadius = 3;
+            const wingspan = 24;
+            const planeLength = 12;
+            const rollAngle = roll;
+
+            // Create fuselage collision box (cylinder oriented along Z-axis)
+            const fuselageGeometry = new THREE.CylinderGeometry(
+                fuselageRadius,
+                fuselageRadius,
+                planeLength,
+                8,
+                1,
+                true
+            );
+            const fuselageMaterial = new THREE.MeshBasicMaterial({
+                color: 0xFFFF00,  // Yellow
+                wireframe: true,
+                transparent: true,
+                opacity: 0.6
+            });
+            const fuselageBox = new THREE.Mesh(fuselageGeometry, fuselageMaterial);
+
+            // Rotate cylinder to align with plane's forward direction (Z-axis)
+            fuselageBox.rotation.x = Math.PI / 2;
+            fuselageBox.position.copy(aircraft.position);
+            fuselageBox.quaternion.copy(aircraft.quaternion);
+
+            debugCollisionBox = new THREE.Group();
+            debugCollisionBox.add(fuselageBox);
+
+            // Add wingtip markers
+            debugWingtipMarkers = [];
+
+            // Left wingtip
+            const leftWingtipX = aircraft.position.x - Math.cos(rollAngle) * wingspan;
+            const leftWingtipY = aircraft.position.y - Math.sin(rollAngle) * wingspan;
+            const leftWingtipZ = aircraft.position.z;
+
+            const leftMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
+            const leftMarkerMat = new THREE.MeshBasicMaterial({
+                color: 0xFF0000,  // Red
+                wireframe: true,
+                transparent: true,
+                opacity: 0.8
+            });
+            const leftMarker = new THREE.Mesh(leftMarkerGeo, leftMarkerMat);
+            leftMarker.position.set(leftWingtipX, leftWingtipY, leftWingtipZ);
+            debugWingtipMarkers.push(leftMarker);
+            scene.add(leftMarker);
+
+            // Right wingtip
+            const rightWingtipX = aircraft.position.x + Math.cos(rollAngle) * wingspan;
+            const rightWingtipY = aircraft.position.y + Math.sin(rollAngle) * wingspan;
+            const rightWingtipZ = aircraft.position.z;
+
+            const rightMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
+            const rightMarkerMat = new THREE.MeshBasicMaterial({
+                color: 0x00FF00,  // Green
+                wireframe: true,
+                transparent: true,
+                opacity: 0.8
+            });
+            const rightMarker = new THREE.Mesh(rightMarkerGeo, rightMarkerMat);
+            rightMarker.position.set(rightWingtipX, rightWingtipY, rightWingtipZ);
+            debugWingtipMarkers.push(rightMarker);
+            scene.add(rightMarker);
+
+            scene.add(debugCollisionBox);
+        }
+
         function updateDebugLines() {
             if (!aircraft) return;
 
@@ -828,6 +984,29 @@
             optimalPathLine = new THREE.Line(optimalGeometry, optimalMaterial);
             optimalPathLine.computeLineDistances();
             scene.add(optimalPathLine);
+
+            // Orange/Gold line: Racing line (smooth path with maximum turning radius)
+            if (racingLine) {
+                scene.remove(racingLine);
+            }
+
+            const racingLinePoints = calculateRacingLine(
+                startZ,
+                endZ,
+                aircraft.position.x,
+                aircraft.position.y
+            );
+
+            const racingGeometry = new THREE.BufferGeometry().setFromPoints(racingLinePoints);
+            const racingMaterial = new THREE.LineBasicMaterial({
+                color: 0xFFA500,      // Orange
+                linewidth: 8,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            racingLine = new THREE.Line(racingGeometry, racingMaterial);
+            scene.add(racingLine);
         }
 
         function createSimpleDeltaWing() {
@@ -1825,6 +2004,7 @@
                 updateLightingPosition();
                 updateDebugLines();
                 updateDebugCircles();
+                updateCollisionBoxDebug();
                 checkCollisions();
             }
 

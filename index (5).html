@@ -726,6 +726,8 @@
                 debugWingtipMarkers = [];
             }
 
+            debugCollisionBox = new THREE.Group();
+
             // Create fuselage collision box using calculated dimensions
             const fuselageGeometry = new THREE.BoxGeometry(
                 PLANE_DIMS.height,     // Width (X)
@@ -743,9 +745,48 @@
             // Position and orient with the plane
             fuselageBox.position.copy(aircraft.position);
             fuselageBox.quaternion.copy(aircraft.quaternion);
-
-            debugCollisionBox = new THREE.Group();
             debugCollisionBox.add(fuselageBox);
+
+            // Create wing collision volumes extending to wingtips
+            // Left wing
+            const leftWingGeometry = new THREE.BoxGeometry(
+                PLANE_DIMS.wingspan,   // Length to wingtip
+                PLANE_DIMS.height / 2, // Half height of fuselage
+                PLANE_DIMS.length / 3  // Thinner than fuselage
+            );
+            const leftWingMaterial = new THREE.MeshBasicMaterial({
+                color: 0xFFFF00,  // Yellow
+                wireframe: true,
+                transparent: true,
+                opacity: 0.4
+            });
+            const leftWing = new THREE.Mesh(leftWingGeometry, leftWingMaterial);
+            // Position halfway between center and wingtip in local coords
+            const leftWingLocalPos = new THREE.Vector3(PLANE_DIMS.wingspan / 2, 0, 0);
+            leftWingLocalPos.applyQuaternion(aircraft.quaternion);
+            leftWing.position.copy(aircraft.position).add(leftWingLocalPos);
+            leftWing.quaternion.copy(aircraft.quaternion);
+            debugCollisionBox.add(leftWing);
+
+            // Right wing
+            const rightWingGeometry = new THREE.BoxGeometry(
+                PLANE_DIMS.wingspan,   // Length to wingtip
+                PLANE_DIMS.height / 2, // Half height of fuselage
+                PLANE_DIMS.length / 3  // Thinner than fuselage
+            );
+            const rightWingMaterial = new THREE.MeshBasicMaterial({
+                color: 0xFFFF00,  // Yellow
+                wireframe: true,
+                transparent: true,
+                opacity: 0.4
+            });
+            const rightWing = new THREE.Mesh(rightWingGeometry, rightWingMaterial);
+            // Position halfway between center and wingtip in local coords
+            const rightWingLocalPos = new THREE.Vector3(-PLANE_DIMS.wingspan / 2, 0, 0);
+            rightWingLocalPos.applyQuaternion(aircraft.quaternion);
+            rightWing.position.copy(aircraft.position).add(rightWingLocalPos);
+            rightWing.quaternion.copy(aircraft.quaternion);
+            debugCollisionBox.add(rightWing);
 
             // Add wingtip markers using proper quaternion transformation
             debugWingtipMarkers = [];
@@ -1674,15 +1715,32 @@
                     roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5);
                 }
 
-                // Pitch control - COMPLETELY SEPARATE from roll
+                // Pitch control - altitude management + coordinated turns
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                 else {
-                    // Auto-pitch ONLY for altitude management (no turn coupling)
+                    // Coordinated turn: when rolled, pitch up to turn
+                    // At 90° bank, all pitch goes into turning (not climbing)
+                    // At 0° bank, all pitch goes into altitude change
+                    const rollMagnitude = Math.abs(roll);
+                    let turnPitch = 0;
+
+                    if (rollMagnitude > 0.1) {  // If significantly rolled
+                        // Need to pitch up proportional to roll to maintain level turn
+                        // More roll = more pitch needed
+                        turnPitch = rollMagnitude * 0.6;  // Base turn pitch
+                    }
+
+                    // Auto-pitch for altitude management (reduced when banked)
                     const heightError = optimalPos.y - aircraft.position.y;
-                    // Increased gain from 0.02 to 0.05 for more responsive altitude control
-                    const desiredPitch = THREE.MathUtils.clamp(heightError * 0.05, -0.5, 0.5);
-                    pitch = THREE.MathUtils.lerp(pitch, desiredPitch, delta * 5);  // Faster response: 5 instead of 3
+                    // Reduce altitude correction authority when banked (busy turning)
+                    const altitudeAuthority = 1.0 - (rollMagnitude / Math.PI) * 0.7;  // Less authority when banked
+                    const altitudePitch = THREE.MathUtils.clamp(heightError * 0.05, -0.5, 0.5) * altitudeAuthority;
+
+                    // Combine turn pitch and altitude pitch
+                    const desiredPitch = turnPitch + altitudePitch;
+                    const clampedPitch = THREE.MathUtils.clamp(desiredPitch, -0.8, 0.8);
+                    pitch = THREE.MathUtils.lerp(pitch, clampedPitch, delta * 5);
                 }
             } else {
                 // Manual control without stabilization

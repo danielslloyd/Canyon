@@ -1730,12 +1730,14 @@
                     // First sample
                     shouldSample = true;
                     betaLastSamplePos = aircraft.position.clone();
+                    console.log("Beta autopilot: First sample at position", aircraft.position);
                 } else {
                     // Check distance traveled
                     const distanceTraveled = aircraft.position.distanceTo(betaLastSamplePos);
                     if (distanceTraveled >= sampleInterval) {
                         shouldSample = true;
                         betaLastSamplePos = aircraft.position.clone();
+                        console.log("Beta autopilot: Sampling after", distanceTraveled, "units");
                     }
                 }
 
@@ -1776,8 +1778,9 @@
                         let distanceTraveled = 0;
                         let collision = false;
                         let testPos = samplingOrigin.clone();
+                        let lastValidPos = samplingOrigin.clone();
 
-                        while (!collision) {
+                        while (!collision && distanceTraveled < 1000) {
                             // Step forward
                             testPos.add(testDir.clone().multiplyScalar(stepSize));
                             distanceTraveled += stepSize;
@@ -1794,16 +1797,16 @@
                             const clearance = PLANE_DIMS.wingspan + 5;
                             if (testPos.x - clearance < leftWall || testPos.x + clearance > rightWall) {
                                 collision = true;
+                                // Use the last valid position before collision
+                                testPos = lastValidPos.clone();
+                            } else {
+                                // This position is valid, save it
+                                lastValidPos = testPos.clone();
                             }
 
-                            // Check vertical bounds (ground/ceiling)
+                            // Check if we're out of vertical bounds
                             const lowestRim = CONFIG.canyonHeight - 100;
-                            if (samplingY < 8 || samplingY > lowestRim - 10) {
-                                collision = true;
-                            }
-
-                            // Safety limit: don't test beyond 1000 units
-                            if (distanceTraveled > 1000) {
+                            if (testPos.y < 8 || testPos.y > lowestRim - 10) {
                                 collision = true;
                             }
                         }
@@ -1848,6 +1851,11 @@
                         sphere.position.copy(sample.endpoint);
                         scene.add(sphere);
                         betaDebugSpheres.push(sphere);
+                    }
+
+                    console.log("Beta autopilot: Created", betaDebugSpheres.length, "collision spheres");
+                    if (betaDebugSpheres.length > 0) {
+                        console.log("First sphere at:", betaDebugSpheres[0].position);
                     }
 
                     // Create green line for best direction

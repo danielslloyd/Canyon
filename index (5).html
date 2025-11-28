@@ -189,10 +189,12 @@
             <label>Flight Speed: <span id="speed-value" class="value-display">1.5</span>x</label>
             <input type="range" id="flight-speed" min="0.5" max="3" step="0.1" value="1.5">
 
-            <div class="checkbox-container">
-                <input type="checkbox" id="stabilization-enabled" checked>
-                <label for="stabilization-enabled">Auto-stabilization</label>
-            </div>
+            <label>Autopilot Mode:</label>
+            <select id="autopilot-mode">
+                <option value="off">Off</option>
+                <option value="alpha" selected>Alpha (Path Following)</option>
+                <option value="beta">Beta (Longest Path)</option>
+            </select>
 
             <div class="checkbox-container">
                 <input type="checkbox" id="enemies-enabled">
@@ -243,7 +245,7 @@
             enemiesEnabled: false,
             enemyDifficulty: 5,
             timeOfDay: 'morning',
-            stabilizationEnabled: true
+            autopilotMode: 'alpha'  // 'off', 'alpha', or 'beta'
         };
 
         // Game State
@@ -1396,7 +1398,7 @@
             CONFIG.ringFrequency = parseInt(document.getElementById('ring-frequency').value);
             CONFIG.ringRotationAxis = document.getElementById('ring-rotation-axis').value;
             CONFIG.flightSpeed = parseFloat(document.getElementById('flight-speed').value);
-            CONFIG.stabilizationEnabled = document.getElementById('stabilization-enabled').checked;
+            CONFIG.autopilotMode = document.getElementById('autopilot-mode').value;
             CONFIG.enemiesEnabled = document.getElementById('enemies-enabled').checked;
             CONFIG.enemyDifficulty = parseInt(document.getElementById('enemy-difficulty').value);
 
@@ -1602,8 +1604,9 @@
             const lookAheadDistance = 150;
             const targetZ = aircraft.position.z - lookAheadDistance;
 
-            // Auto-stabilization: follow optimal flight path
-            if (CONFIG.stabilizationEnabled) {
+            // Autopilot modes
+            if (CONFIG.autopilotMode === 'alpha') {
+                // ALPHA MODE: Follow optimal flight path
                 // Get optimal path position at look-ahead point
                 const optimalPos = getOptimalFlightPath(targetZ, aircraft.position.x);
 
@@ -1710,8 +1713,130 @@
                     const clampedPitch = THREE.MathUtils.clamp(desiredPitch, -0.8, 0.8);
                     pitch = THREE.MathUtils.lerp(pitch, clampedPitch, delta * 5);
                 }
+            } else if (CONFIG.autopilotMode === 'beta') {
+                // BETA MODE: Find longest straight path without crashing
+
+                // Test directions around the current position
+                const testAnglesHorizontal = 20;  // Test 20 angles left to right
+                const testAnglesPitch = 10;  // Test 10 pitch angles
+                const maxHorizontalAngle = Math.PI / 3;  // ±60 degrees
+                const maxPitchAngle = 0.5;  // ±0.5 radians pitch
+                const testDistance = 300;  // How far ahead to test
+                const testSteps = 30;  // Number of steps to test along each direction
+
+                let bestDistance = 0;
+                let bestDirection = null;
+
+                // Get current canyon position for reference
+                const currentZ = aircraft.position.z;
+
+                // Test different directions
+                for (let h = 0; h < testAnglesHorizontal; h++) {
+                    const horizontalAngle = -maxHorizontalAngle + (h / (testAnglesHorizontal - 1)) * (2 * maxHorizontalAngle);
+
+                    for (let p = 0; p < testAnglesPitch; p++) {
+                        const pitchAngle = -maxPitchAngle + (p / (testAnglesPitch - 1)) * (2 * maxPitchAngle);
+
+                        // Create a direction vector for this test
+                        const testDir = new THREE.Vector3(
+                            Math.sin(horizontalAngle),
+                            Math.sin(pitchAngle),
+                            -Math.cos(horizontalAngle) * Math.cos(pitchAngle)
+                        ).normalize();
+
+                        // Test how far we can go in this direction
+                        let distanceTraveled = 0;
+                        let collision = false;
+
+                        for (let step = 0; step < testSteps && !collision; step++) {
+                            const stepDist = (testDistance / testSteps) * (step + 1);
+                            const testPos = aircraft.position.clone().add(testDir.clone().multiplyScalar(stepDist));
+
+                            // Check if this position is inside the canyon
+                            const testZ = testPos.z;
+                            const canyonCenterX = getCanyonCenter(testZ);
+                            const widthMultiplier = getCanyonWidthMultiplier(testZ);
+                            const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
+                            const leftWall = canyonCenterX - halfWidth;
+                            const rightWall = canyonCenterX + halfWidth;
+
+                            // Check horizontal bounds with wingspan clearance
+                            const clearance = PLANE_DIMS.wingspan + 5;
+                            if (testPos.x - clearance < leftWall || testPos.x + clearance > rightWall) {
+                                collision = true;
+                            }
+
+                            // Check vertical bounds
+                            const lowestRim = CONFIG.canyonHeight - 100;
+                            if (testPos.y < 8 || testPos.y > lowestRim - 10) {
+                                collision = true;
+                            }
+
+                            if (!collision) {
+                                distanceTraveled = stepDist;
+                            }
+                        }
+
+                        // If this direction is better, save it
+                        if (distanceTraveled > bestDistance) {
+                            bestDistance = distanceTraveled;
+                            bestDirection = testDir.clone();
+                        }
+                    }
+                }
+
+                // Point the jet toward the best direction
+                if (bestDirection) {
+                    // Calculate desired roll and pitch to point in bestDirection
+                    // Get current nose direction
+                    const currentNose = new THREE.Vector3(0, 0, -1);
+                    currentNose.applyQuaternion(aircraft.quaternion);
+
+                    // Calculate angle differences
+                    // Horizontal angle (for roll)
+                    const horizontalTarget = Math.atan2(bestDirection.x, -bestDirection.z);
+                    const horizontalCurrent = Math.atan2(currentNose.x, -currentNose.z);
+                    const horizontalError = horizontalTarget - horizontalCurrent;
+
+                    // Pitch angle
+                    const pitchTarget = Math.asin(bestDirection.y);
+                    const pitchCurrent = Math.asin(currentNose.y);
+                    const pitchError = pitchTarget - pitchCurrent;
+
+                    // User input modifies roll
+                    if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
+                    else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
+                    else {
+                        // Use roll to turn toward target direction
+                        const targetRoll = THREE.MathUtils.clamp(horizontalError * 2, -Math.PI / 2, Math.PI / 2);
+                        roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5);
+                    }
+
+                    // User input modifies pitch
+                    if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
+                    else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
+                    else {
+                        // Coordinated turn with pitch correction
+                        const rollMagnitude = Math.abs(roll);
+                        let turnPitch = rollMagnitude * 0.6;
+
+                        // Add pitch to aim at target
+                        const targetPitch = turnPitch + pitchError * 0.5;
+                        const clampedPitch = THREE.MathUtils.clamp(targetPitch, -0.8, 0.8);
+                        pitch = THREE.MathUtils.lerp(pitch, clampedPitch, delta * 5);
+                    }
+                } else {
+                    // No good path found - use manual control
+                    if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
+                    else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
+                    else pitch *= 0.95;
+
+                    if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
+                    else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
+                    else roll *= 0.95;
+                }
             } else {
-                // Manual control without stabilization
+                // Manual control without autopilot
                 if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                 else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                 else pitch *= 0.95;  // Decay pitch when not actively controlling

@@ -273,7 +273,7 @@
         let debugCollisionBox = null;
         let betaDebugRedLines = [];   // Red sample lines (cleared each frame)
         let betaDebugGreenLines = [];  // Green chosen lines (persistent)
-        let betaDebugSpheres = [];     // Collision point spheres (cleared each frame)
+        let betaDebugSphereBatches = [];  // Array of sphere batches (keep last 2 samples)
 
         // Plane dimensions - will be calculated from F22 model
         let PLANE_DIMS = {
@@ -1744,11 +1744,9 @@
                 let bestDirection = null;
 
                 if (shouldSample) {
-                    // Clean up old red debug lines and spheres
+                    // Clean up old red debug lines (every sample)
                     betaDebugRedLines.forEach(line => scene.remove(line));
                     betaDebugRedLines = [];
-                    betaDebugSpheres.forEach(sphere => scene.remove(sphere));
-                    betaDebugSpheres = [];
 
                     // Store the position where we're sampling from
                     const samplingOrigin = aircraft.position.clone();
@@ -1826,6 +1824,8 @@
                     }
 
                     // Create debug visualization for all sample paths (red lines + collision spheres)
+                    const newSphereBatch = [];  // New batch for this sample
+
                     for (let i = 0; i < samplePaths.length; i++) {
                         const sample = samplePaths[i];
                         const points = [samplingOrigin, sample.endpoint];
@@ -1850,12 +1850,22 @@
                         const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
                         sphere.position.copy(sample.endpoint);
                         scene.add(sphere);
-                        betaDebugSpheres.push(sphere);
+                        newSphereBatch.push(sphere);
                     }
 
-                    console.log("Beta autopilot: Created", betaDebugSpheres.length, "collision spheres");
-                    if (betaDebugSpheres.length > 0) {
-                        console.log("First sphere at:", betaDebugSpheres[0].position);
+                    // Add this batch to our collection
+                    betaDebugSphereBatches.push(newSphereBatch);
+
+                    // Keep only last 2 batches
+                    if (betaDebugSphereBatches.length > 2) {
+                        const oldBatch = betaDebugSphereBatches.shift();
+                        oldBatch.forEach(sphere => scene.remove(sphere));
+                    }
+
+                    console.log("Beta autopilot: Created", newSphereBatch.length, "collision spheres");
+                    console.log("Total sphere batches:", betaDebugSphereBatches.length);
+                    if (newSphereBatch.length > 0) {
+                        console.log("First sphere at:", newSphereBatch[0].position);
                     }
 
                     // Create green line for best direction

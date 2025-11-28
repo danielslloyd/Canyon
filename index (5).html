@@ -1791,9 +1791,8 @@
                             const leftWall = canyonCenterX - halfWidth;
                             const rightWall = canyonCenterX + halfWidth;
 
-                            // Check horizontal bounds with wingspan clearance
-                            const clearance = PLANE_DIMS.wingspan + 5;
-                            if (testPos.x - clearance < leftWall || testPos.x + clearance > rightWall) {
+                            // Check if ray has hit the canyon walls (no clearance - we want actual wall collision)
+                            if (testPos.x < leftWall || testPos.x > rightWall) {
                                 collision = true;
                                 // Use the last valid position before collision
                                 testPos = lastValidPos.clone();

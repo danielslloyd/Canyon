@@ -273,6 +273,7 @@
         let debugCollisionBox = null;
         let betaDebugRedLines = [];   // Red sample lines (cleared each frame)
         let betaDebugGreenLines = [];  // Green chosen lines (persistent)
+        let betaDebugSpheres = [];     // Collision point spheres (cleared each frame)
 
         // Plane dimensions - will be calculated from F22 model
         let PLANE_DIMS = {
@@ -1741,9 +1742,11 @@
                 let bestDirection = null;
 
                 if (shouldSample) {
-                    // Clean up old red debug lines
+                    // Clean up old red debug lines and spheres
                     betaDebugRedLines.forEach(line => scene.remove(line));
                     betaDebugRedLines = [];
+                    betaDebugSpheres.forEach(sphere => scene.remove(sphere));
+                    betaDebugSpheres = [];
 
                     // Store the position where we're sampling from
                     const samplingOrigin = aircraft.position.clone();
@@ -1819,7 +1822,7 @@
                         }
                     }
 
-                    // Create debug visualization for all sample paths (red lines)
+                    // Create debug visualization for all sample paths (red lines + collision spheres)
                     for (let i = 0; i < samplePaths.length; i++) {
                         const sample = samplePaths[i];
                         const points = [samplingOrigin, sample.endpoint];
@@ -1833,6 +1836,18 @@
                         const line = new THREE.Line(lineGeometry, lineMaterial);
                         scene.add(line);
                         betaDebugRedLines.push(line);
+
+                        // Add sphere at collision point
+                        const sphereGeometry = new THREE.SphereGeometry(3, 8, 8);  // Radius 3
+                        const sphereMaterial = new THREE.MeshBasicMaterial({
+                            color: 0xff0000,  // Red to match line
+                            transparent: true,
+                            opacity: 0.6
+                        });
+                        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                        sphere.position.copy(sample.endpoint);
+                        scene.add(sphere);
+                        betaDebugSpheres.push(sphere);
                     }
 
                     // Create green line for best direction

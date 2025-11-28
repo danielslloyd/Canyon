@@ -173,8 +173,8 @@
             <label>Canyon Detail (LOD): <span id="lod-value" class="value-display">12</span></label>
             <input type="range" id="canyon-lod" min="2" max="20" value="12">
 
-            <label>Ring Frequency: <span id="ring-freq-value" class="value-display">3</span></label>
-            <input type="range" id="ring-frequency" min="0" max="10" value="3">
+            <label>Ring Frequency: <span id="ring-freq-value" class="value-display">0</span></label>
+            <input type="range" id="ring-frequency" min="0" max="10" value="0">
 
             <label>Ring Rotation Axis:</label>
             <select id="ring-rotation-axis">
@@ -186,14 +186,14 @@
                 <option value="yz">Y+Z axes</option>
             </select>
 
-            <label>Flight Speed: <span id="speed-value" class="value-display">1.5</span>x</label>
-            <input type="range" id="flight-speed" min="0.5" max="3" step="0.1" value="1.5">
+            <label>Flight Speed: <span id="speed-value" class="value-display">0.5</span>x</label>
+            <input type="range" id="flight-speed" min="0.5" max="3" step="0.1" value="0.5">
 
             <label>Autopilot Mode:</label>
             <select id="autopilot-mode">
                 <option value="off">Off</option>
-                <option value="alpha" selected>Alpha (Path Following)</option>
-                <option value="beta">Beta (Longest Path)</option>
+                <option value="alpha">Alpha (Path Following)</option>
+                <option value="beta" selected>Beta (Longest Path)</option>
             </select>
 
             <div class="checkbox-container">
@@ -239,13 +239,13 @@
             segmentLength: 100,
             visibleSegments: 25,
             lodLevel: 12,
-            ringFrequency: 3,
+            ringFrequency: 0,
             ringRotationAxis: 'z',  // Z-axis is correct
-            flightSpeed: 1.5,
+            flightSpeed: 0.5,
             enemiesEnabled: false,
             enemyDifficulty: 5,
             timeOfDay: 'morning',
-            autopilotMode: 'alpha'  // 'off', 'alpha', or 'beta'
+            autopilotMode: 'beta'  // 'off', 'alpha', or 'beta'
         };
 
         // Game State
@@ -271,7 +271,8 @@
         let debugPitchCircle = null;
         let debugRollCircle = null;
         let debugCollisionBox = null;
-        let betaDebugLines = [];  // Store debug lines for Beta autopilot
+        let betaDebugRedLines = [];   // Red sample lines (cleared each frame)
+        let betaDebugGreenLines = [];  // Green chosen lines (persistent)
 
         // Plane dimensions - will be calculated from F22 model
         let PLANE_DIMS = {
@@ -1717,119 +1718,127 @@
             } else if (CONFIG.autopilotMode === 'beta') {
                 // BETA MODE: Find longest straight path without crashing
 
-                // Clean up old debug lines
-                betaDebugLines.forEach(line => scene.remove(line));
-                betaDebugLines = [];
+                // Clean up old red debug lines (green lines persist)
+                betaDebugRedLines.forEach(line => scene.remove(line));
+                betaDebugRedLines = [];
 
                 // Store the position where we're sampling from
                 const samplingOrigin = aircraft.position.clone();
 
-                // Test directions around the current position
-                const testAnglesHorizontal = 20;  // Test 20 angles left to right
-                const testAnglesPitch = 10;  // Test 10 pitch angles
-                const maxHorizontalAngle = Math.PI / 3;  // ±60 degrees
-                const maxPitchAngle = 0.5;  // ±0.5 radians pitch
-                const testDistance = 300;  // How far ahead to test
-                const testSteps = 30;  // Number of steps to test along each direction
+                // Get current nose direction to define cone axis
+                const noseDirection = new THREE.Vector3(0, 0, -1);
+                noseDirection.applyQuaternion(aircraft.quaternion);
+
+                // Test parameters
+                const numSamples = 200;  // 200 random samples
+                const coneAngle = Math.PI / 6;  // 30 degrees (15 degrees from center)
+                const testDistance = 500;  // How far ahead to test (extended)
+                const testSteps = 50;  // Number of steps to test along each direction
 
                 let bestDistance = 0;
                 let bestDirection = null;
-                let bestHorizontalIdx = -1;
-                let bestPitchIdx = -1;
+                const testedDirections = [];  // Store all tested directions for visualization
 
-                // Get current canyon position for reference
-                const currentZ = aircraft.position.z;
+                // Generate random directions within cone
+                for (let i = 0; i < numSamples; i++) {
+                    // Generate random direction within cone using spherical coordinates
+                    // Random angle around the cone axis
+                    const phi = Math.random() * 2 * Math.PI;
+                    // Random angle from cone axis (biased toward center using square root)
+                    const theta = Math.acos(1 - Math.random() * (1 - Math.cos(coneAngle)));
 
-                // Test different directions
-                for (let h = 0; h < testAnglesHorizontal; h++) {
-                    const horizontalAngle = -maxHorizontalAngle + (h / (testAnglesHorizontal - 1)) * (2 * maxHorizontalAngle);
+                    // Create direction in cone-local space (cone points along +Z)
+                    const localDir = new THREE.Vector3(
+                        Math.sin(theta) * Math.cos(phi),
+                        Math.sin(theta) * Math.sin(phi),
+                        Math.cos(theta)
+                    );
 
-                    for (let p = 0; p < testAnglesPitch; p++) {
-                        const pitchAngle = -maxPitchAngle + (p / (testAnglesPitch - 1)) * (2 * maxPitchAngle);
+                    // Rotate to align with nose direction
+                    const up = new THREE.Vector3(0, 1, 0);
+                    const quaternion = new THREE.Quaternion();
+                    quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), noseDirection);
+                    localDir.applyQuaternion(quaternion);
 
-                        // Create a direction vector for this test
-                        const testDir = new THREE.Vector3(
-                            Math.sin(horizontalAngle),
-                            Math.sin(pitchAngle),
-                            -Math.cos(horizontalAngle) * Math.cos(pitchAngle)
-                        ).normalize();
+                    const testDir = localDir.normalize();
+                    testedDirections.push(testDir.clone());
 
-                        // Test how far we can go in this direction
-                        let distanceTraveled = 0;
-                        let collision = false;
+                    // Test how far we can go in this direction
+                    let distanceTraveled = 0;
+                    let collision = false;
 
-                        for (let step = 0; step < testSteps && !collision; step++) {
-                            const stepDist = (testDistance / testSteps) * (step + 1);
-                            const testPos = aircraft.position.clone().add(testDir.clone().multiplyScalar(stepDist));
+                    for (let step = 0; step < testSteps && !collision; step++) {
+                        const stepDist = (testDistance / testSteps) * (step + 1);
+                        const testPos = aircraft.position.clone().add(testDir.clone().multiplyScalar(stepDist));
 
-                            // Check if this position is inside the canyon
-                            const testZ = testPos.z;
-                            const canyonCenterX = getCanyonCenter(testZ);
-                            const widthMultiplier = getCanyonWidthMultiplier(testZ);
-                            const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
-                            const leftWall = canyonCenterX - halfWidth;
-                            const rightWall = canyonCenterX + halfWidth;
+                        // Check if this position is inside the canyon
+                        const testZ = testPos.z;
+                        const canyonCenterX = getCanyonCenter(testZ);
+                        const widthMultiplier = getCanyonWidthMultiplier(testZ);
+                        const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
+                        const leftWall = canyonCenterX - halfWidth;
+                        const rightWall = canyonCenterX + halfWidth;
 
-                            // Check horizontal bounds with wingspan clearance
-                            const clearance = PLANE_DIMS.wingspan + 5;
-                            if (testPos.x - clearance < leftWall || testPos.x + clearance > rightWall) {
-                                collision = true;
-                            }
-
-                            // Check vertical bounds
-                            const lowestRim = CONFIG.canyonHeight - 100;
-                            if (testPos.y < 8 || testPos.y > lowestRim - 10) {
-                                collision = true;
-                            }
-
-                            if (!collision) {
-                                distanceTraveled = stepDist;
-                            }
+                        // Check horizontal bounds with wingspan clearance
+                        const clearance = PLANE_DIMS.wingspan + 5;
+                        if (testPos.x - clearance < leftWall || testPos.x + clearance > rightWall) {
+                            collision = true;
                         }
 
-                        // If this direction is better, save it
-                        if (distanceTraveled > bestDistance) {
-                            bestDistance = distanceTraveled;
-                            bestDirection = testDir.clone();
-                            bestHorizontalIdx = h;
-                            bestPitchIdx = p;
+                        // Check vertical bounds
+                        const lowestRim = CONFIG.canyonHeight - 100;
+                        if (testPos.y < 8 || testPos.y > lowestRim - 10) {
+                            collision = true;
                         }
+
+                        if (!collision) {
+                            distanceTraveled = stepDist;
+                        }
+                    }
+
+                    // If this direction is better, save it
+                    if (distanceTraveled > bestDistance) {
+                        bestDistance = distanceTraveled;
+                        bestDirection = testDir.clone();
                     }
                 }
 
-                // Create debug visualization for all test directions
-                for (let h = 0; h < testAnglesHorizontal; h++) {
-                    const horizontalAngle = -maxHorizontalAngle + (h / (testAnglesHorizontal - 1)) * (2 * maxHorizontalAngle);
+                // Create debug visualization for all test directions (red lines)
+                const redLineLength = 300;  // Extended line length
+                for (let i = 0; i < testedDirections.length; i++) {
+                    const testDir = testedDirections[i];
+                    const endPoint = samplingOrigin.clone().add(testDir.clone().multiplyScalar(redLineLength));
 
-                    for (let p = 0; p < testAnglesPitch; p++) {
-                        const pitchAngle = -maxPitchAngle + (p / (testAnglesPitch - 1)) * (2 * maxPitchAngle);
+                    const points = [samplingOrigin, endPoint];
+                    const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+                    const lineMaterial = new THREE.LineBasicMaterial({
+                        color: 0xff0000,  // Red for all samples
+                        opacity: 0.3,
+                        transparent: true
+                    });
 
-                        // Create the same direction vector
-                        const testDir = new THREE.Vector3(
-                            Math.sin(horizontalAngle),
-                            Math.sin(pitchAngle),
-                            -Math.cos(horizontalAngle) * Math.cos(pitchAngle)
-                        ).normalize();
+                    const line = new THREE.Line(lineGeometry, lineMaterial);
+                    scene.add(line);
+                    betaDebugRedLines.push(line);
+                }
 
-                        // Determine if this is the best direction
-                        const isBest = (h === bestHorizontalIdx && p === bestPitchIdx);
+                // Create fat green line for best direction (persistent)
+                if (bestDirection) {
+                    const greenLineLength = 300;  // Extended line length
+                    const endPoint = samplingOrigin.clone().add(bestDirection.clone().multiplyScalar(greenLineLength));
 
-                        // Create a line from sampling origin in this direction
-                        const lineLength = 50;  // Visual length of debug line
-                        const endPoint = samplingOrigin.clone().add(testDir.clone().multiplyScalar(lineLength));
+                    // Create a fat line using TubeGeometry
+                    const path = new THREE.LineCurve3(samplingOrigin, endPoint);
+                    const tubeGeometry = new THREE.TubeGeometry(path, 1, 2, 8, false);  // Radius of 2 for "fat" line
+                    const tubeMaterial = new THREE.MeshBasicMaterial({
+                        color: 0x00ff00,  // Green
+                        transparent: true,
+                        opacity: 0.8
+                    });
 
-                        const points = [samplingOrigin, endPoint];
-                        const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
-                        const lineMaterial = new THREE.LineBasicMaterial({
-                            color: isBest ? 0x00ff00 : 0xff0000,  // Green for best, red for others
-                            opacity: isBest ? 1.0 : 0.3,
-                            transparent: true
-                        });
-
-                        const line = new THREE.Line(lineGeometry, lineMaterial);
-                        scene.add(line);
-                        betaDebugLines.push(line);
-                    }
+                    const greenLine = new THREE.Mesh(tubeGeometry, tubeMaterial);
+                    scene.add(greenLine);
+                    betaDebugGreenLines.push(greenLine);  // Keep green lines persistent
                 }
 
                 // Point the jet toward the best direction

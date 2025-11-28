@@ -1750,9 +1750,6 @@
             const movement = noseDirection.multiplyScalar(speed);
             aircraft.position.add(movement);
 
-            // Update debug arrows with actual travel direction
-            updateDebugArrows(movement);
-
             // Clamp vertical position only
             const lowestRim = CONFIG.canyonHeight - 100;
             aircraft.position.y = Math.max(8, Math.min(lowestRim - 10, aircraft.position.y));

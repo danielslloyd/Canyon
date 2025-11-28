@@ -264,12 +264,11 @@
         let enemyBullets = [];
         let autopilotPathLine = null;
         let canyonCenterLine = null;
+        let bestPathLine = null;
+        let transitionPathLine = null;
         let debugPitchCircle = null;
         let debugRollCircle = null;
-        let debugTravelArrow = null;
-        let debugNoseArrow = null;
         let debugCollisionBox = null;
-        let debugWingtipMarkers = null;
 
         // Plane dimensions - will be calculated from F22 model
         let PLANE_DIMS = {
@@ -605,45 +604,6 @@
             }
         }
 
-        function updateDebugArrows(travelDirection) {
-            if (!aircraft) return;
-
-            // Remove old arrows
-            if (debugTravelArrow) {
-                scene.remove(debugTravelArrow);
-            }
-            if (debugNoseArrow) {
-                scene.remove(debugNoseArrow);
-            }
-
-            // Arrow showing actual direction of travel (GREEN)
-            const travelDir = travelDirection.clone().normalize();
-            const arrowOrigin = aircraft.position.clone();
-            arrowOrigin.add(new THREE.Vector3(0, 0, -10).applyQuaternion(aircraft.quaternion)); // Front of plane
-            debugTravelArrow = new THREE.ArrowHelper(
-                travelDir,
-                arrowOrigin,
-                15,  // length
-                0x00FF00,  // green
-                3,  // head length
-                2   // head width
-            );
-            scene.add(debugTravelArrow);
-
-            // Arrow showing nose direction (RED)
-            const noseDir = new THREE.Vector3(0, 0, -1);
-            noseDir.applyQuaternion(aircraft.quaternion);
-            debugNoseArrow = new THREE.ArrowHelper(
-                noseDir,
-                arrowOrigin,
-                15,  // length
-                0xFF0000,  // red
-                3,  // head length
-                2   // head width
-            );
-            scene.add(debugNoseArrow);
-        }
-
         function updateDebugCircles() {
             if (!aircraft) return;
 
@@ -721,111 +681,27 @@
             if (debugCollisionBox) {
                 scene.remove(debugCollisionBox);
             }
-            if (debugWingtipMarkers) {
-                debugWingtipMarkers.forEach(marker => scene.remove(marker));
-                debugWingtipMarkers = [];
-            }
 
             debugCollisionBox = new THREE.Group();
 
-            // Create fuselage collision box using calculated dimensions
-            const fuselageGeometry = new THREE.BoxGeometry(
-                PLANE_DIMS.height,     // Width (X)
-                PLANE_DIMS.height,     // Height (Y)
-                PLANE_DIMS.length      // Length (Z)
+            // Create tight bounding box using PLANE_DIMS
+            const boxGeometry = new THREE.BoxGeometry(
+                PLANE_DIMS.wingspan * 2,  // Full wingspan
+                PLANE_DIMS.height,         // Height
+                PLANE_DIMS.length          // Length
             );
-            const fuselageMaterial = new THREE.MeshBasicMaterial({
+            const boxMaterial = new THREE.MeshBasicMaterial({
                 color: 0xFFFF00,  // Yellow
                 wireframe: true,
                 transparent: true,
-                opacity: 0.6
+                opacity: 0.5
             });
-            const fuselageBox = new THREE.Mesh(fuselageGeometry, fuselageMaterial);
+            const box = new THREE.Mesh(boxGeometry, boxMaterial);
 
             // Position and orient with the plane
-            fuselageBox.position.copy(aircraft.position);
-            fuselageBox.quaternion.copy(aircraft.quaternion);
-            debugCollisionBox.add(fuselageBox);
-
-            // Create wing collision volumes extending to wingtips
-            // Left wing
-            const leftWingGeometry = new THREE.BoxGeometry(
-                PLANE_DIMS.wingspan,   // Length to wingtip
-                PLANE_DIMS.height / 2, // Half height of fuselage
-                PLANE_DIMS.length / 3  // Thinner than fuselage
-            );
-            const leftWingMaterial = new THREE.MeshBasicMaterial({
-                color: 0xFFFF00,  // Yellow
-                wireframe: true,
-                transparent: true,
-                opacity: 0.4
-            });
-            const leftWing = new THREE.Mesh(leftWingGeometry, leftWingMaterial);
-            // Position halfway between center and wingtip in local coords
-            const leftWingLocalPos = new THREE.Vector3(PLANE_DIMS.wingspan / 2, 0, 0);
-            leftWingLocalPos.applyQuaternion(aircraft.quaternion);
-            leftWing.position.copy(aircraft.position).add(leftWingLocalPos);
-            leftWing.quaternion.copy(aircraft.quaternion);
-            debugCollisionBox.add(leftWing);
-
-            // Right wing
-            const rightWingGeometry = new THREE.BoxGeometry(
-                PLANE_DIMS.wingspan,   // Length to wingtip
-                PLANE_DIMS.height / 2, // Half height of fuselage
-                PLANE_DIMS.length / 3  // Thinner than fuselage
-            );
-            const rightWingMaterial = new THREE.MeshBasicMaterial({
-                color: 0xFFFF00,  // Yellow
-                wireframe: true,
-                transparent: true,
-                opacity: 0.4
-            });
-            const rightWing = new THREE.Mesh(rightWingGeometry, rightWingMaterial);
-            // Position halfway between center and wingtip in local coords
-            const rightWingLocalPos = new THREE.Vector3(-PLANE_DIMS.wingspan / 2, 0, 0);
-            rightWingLocalPos.applyQuaternion(aircraft.quaternion);
-            rightWing.position.copy(aircraft.position).add(rightWingLocalPos);
-            rightWing.quaternion.copy(aircraft.quaternion);
-            debugCollisionBox.add(rightWing);
-
-            // Add wingtip markers using proper quaternion transformation
-            debugWingtipMarkers = [];
-
-            // Left wingtip in local coordinates (positive X direction)
-            const leftLocalPos = new THREE.Vector3(PLANE_DIMS.wingspan, 0, 0);
-            // Transform to world coordinates using aircraft quaternion
-            leftLocalPos.applyQuaternion(aircraft.quaternion);
-            const leftWingtip = aircraft.position.clone().add(leftLocalPos);
-
-            const leftMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
-            const leftMarkerMat = new THREE.MeshBasicMaterial({
-                color: 0xFF0000,  // Red
-                wireframe: true,
-                transparent: true,
-                opacity: 0.8
-            });
-            const leftMarker = new THREE.Mesh(leftMarkerGeo, leftMarkerMat);
-            leftMarker.position.copy(leftWingtip);
-            debugWingtipMarkers.push(leftMarker);
-            scene.add(leftMarker);
-
-            // Right wingtip in local coordinates (negative X direction)
-            const rightLocalPos = new THREE.Vector3(-PLANE_DIMS.wingspan, 0, 0);
-            // Transform to world coordinates using aircraft quaternion
-            rightLocalPos.applyQuaternion(aircraft.quaternion);
-            const rightWingtip = aircraft.position.clone().add(rightLocalPos);
-
-            const rightMarkerGeo = new THREE.SphereGeometry(1.5, 8, 8);
-            const rightMarkerMat = new THREE.MeshBasicMaterial({
-                color: 0x00FF00,  // Green
-                wireframe: true,
-                transparent: true,
-                opacity: 0.8
-            });
-            const rightMarker = new THREE.Mesh(rightMarkerGeo, rightMarkerMat);
-            rightMarker.position.copy(rightWingtip);
-            debugWingtipMarkers.push(rightMarker);
-            scene.add(rightMarker);
+            box.position.copy(aircraft.position);
+            box.quaternion.copy(aircraft.quaternion);
+            debugCollisionBox.add(box);
 
             scene.add(debugCollisionBox);
         }
@@ -839,6 +715,12 @@
             }
             if (canyonCenterLine) {
                 scene.remove(canyonCenterLine);
+            }
+            if (bestPathLine) {
+                scene.remove(bestPathLine);
+            }
+            if (transitionPathLine) {
+                scene.remove(transitionPathLine);
             }
 
             const startZ = aircraft.position.z + 50;  // Start a bit behind
@@ -885,6 +767,58 @@
             canyonCenterLine = new THREE.Line(canyonCenterGeometry, canyonCenterMaterial);
             canyonCenterLine.computeLineDistances();
             scene.add(canyonCenterLine);
+
+            // Cyan line: Best path (optimal flight path ahead)
+            const bestPathPoints = [];
+            let currentX = aircraft.position.x;
+            for (let z = startZ; z >= endZ; z -= step) {
+                const optimalPos = getOptimalFlightPath(z, currentX);
+                bestPathPoints.push(new THREE.Vector3(optimalPos.x, optimalPos.y, z));
+                currentX = optimalPos.x;
+            }
+
+            const bestPathGeometry = new THREE.BufferGeometry().setFromPoints(bestPathPoints);
+            const bestPathMaterial = new THREE.LineBasicMaterial({
+                color: 0x00FFFF,      // Cyan
+                linewidth: 6,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            bestPathLine = new THREE.Line(bestPathGeometry, bestPathMaterial);
+            scene.add(bestPathLine);
+
+            // Orange line: Transition path (how plane will get to best line)
+            // Calculate smooth transition from current position to optimal path
+            const transitionPoints = [];
+            const transitionSteps = 30;  // Number of steps in transition
+            const lookAhead = 150;  // Match autopilot lookahead
+
+            for (let i = 0; i <= transitionSteps; i++) {
+                const t = i / transitionSteps;  // 0 to 1
+                const z = aircraft.position.z - (t * lookAhead);
+
+                // Get optimal position at this Z
+                const optimalPos = getOptimalFlightPath(z, aircraft.position.x);
+
+                // Smooth interpolation from current position to optimal path
+                const smoothing = Math.pow(t, 1.5);  // Ease-in curve
+                const x = THREE.MathUtils.lerp(aircraft.position.x, optimalPos.x, smoothing);
+                const y = THREE.MathUtils.lerp(aircraft.position.y, optimalPos.y, smoothing);
+
+                transitionPoints.push(new THREE.Vector3(x, y, z));
+            }
+
+            const transitionGeometry = new THREE.BufferGeometry().setFromPoints(transitionPoints);
+            const transitionMaterial = new THREE.LineBasicMaterial({
+                color: 0xFFA500,      // Orange
+                linewidth: 4,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            transitionPathLine = new THREE.Line(transitionGeometry, transitionMaterial);
+            scene.add(transitionPathLine);
         }
 
         function createSimpleDeltaWing() {
@@ -986,26 +920,60 @@
 
                     aircraftGroup.add(model);
 
-                    // Calculate bounding box from loaded model
-                    aircraftGroup.updateMatrixWorld(true);  // Force update before measuring
-                    const box = new THREE.Box3().setFromObject(aircraftGroup);
-                    const size = new THREE.Vector3();
-                    box.getSize(size);
+                    // Calculate tight bounding box from actual model vertices
+                    aircraftGroup.updateMatrixWorld(true);
+
+                    // Calculate bounding box from all mesh vertices
+                    let minX = Infinity, maxX = -Infinity;
+                    let minY = Infinity, maxY = -Infinity;
+                    let minZ = Infinity, maxZ = -Infinity;
+
+                    model.traverse((child) => {
+                        if (child.isMesh && child.geometry) {
+                            const geometry = child.geometry;
+                            const positionAttribute = geometry.getAttribute('position');
+
+                            if (positionAttribute) {
+                                const vertex = new THREE.Vector3();
+                                for (let i = 0; i < positionAttribute.count; i++) {
+                                    vertex.fromBufferAttribute(positionAttribute, i);
+                                    // Transform vertex to world space
+                                    vertex.applyMatrix4(child.matrixWorld);
+
+                                    minX = Math.min(minX, vertex.x);
+                                    maxX = Math.max(maxX, vertex.x);
+                                    minY = Math.min(minY, vertex.y);
+                                    maxY = Math.max(maxY, vertex.y);
+                                    minZ = Math.min(minZ, vertex.z);
+                                    maxZ = Math.max(maxZ, vertex.z);
+                                }
+                            }
+                        }
+                    });
+
+                    const sizeX = maxX - minX;
+                    const sizeY = maxY - minY;
+                    const sizeZ = maxZ - minZ;
 
                     PLANE_DIMS = {
-                        wingspan: size.x / 2,        // Half of full width
-                        length: size.z,              // Full length
-                        height: size.y,              // Full height
-                        fuselageRadius: Math.min(size.x, size.y) / 3  // Conservative fuselage radius
+                        wingspan: sizeX / 2,        // Half of full width
+                        length: sizeZ,              // Full length
+                        height: sizeY,              // Full height
+                        fuselageRadius: Math.min(sizeX, sizeY) / 4  // Tighter fuselage radius
                     };
 
                     console.log('✅ F22 model loaded successfully from:', path);
-                    console.log('📏 F22 Bounding Box:', {
-                        fullWidth: size.x.toFixed(2),
+                    console.log('📏 F22 Tight Bounding Box (from vertices):', {
+                        fullWidth: sizeX.toFixed(2),
                         halfWingspan: PLANE_DIMS.wingspan.toFixed(2),
                         length: PLANE_DIMS.length.toFixed(2),
                         height: PLANE_DIMS.height.toFixed(2),
-                        fuselageRadius: PLANE_DIMS.fuselageRadius.toFixed(2)
+                        fuselageRadius: PLANE_DIMS.fuselageRadius.toFixed(2),
+                        vertexRange: {
+                            x: `${minX.toFixed(2)} to ${maxX.toFixed(2)}`,
+                            y: `${minY.toFixed(2)} to ${maxY.toFixed(2)}`,
+                            z: `${minZ.toFixed(2)} to ${maxZ.toFixed(2)}`
+                        }
                     });
 
                     modelLoaded = true;

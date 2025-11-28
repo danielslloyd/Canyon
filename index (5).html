@@ -1777,11 +1777,13 @@
                         let collision = false;
                         let testPos = samplingOrigin.clone();
                         let lastValidPos = samplingOrigin.clone();
+                        let stepCount = 0;
 
                         while (!collision && distanceTraveled < 1000) {
                             // Step forward
                             testPos.add(testDir.clone().multiplyScalar(stepSize));
                             distanceTraveled += stepSize;
+                            stepCount++;
 
                             // Check if this position is inside the canyon
                             const testZ = testPos.z;
@@ -1791,11 +1793,19 @@
                             const leftWall = canyonCenterX - halfWidth;
                             const rightWall = canyonCenterX + halfWidth;
 
+                            // Debug first sample only
+                            if (i === 0 && stepCount <= 3) {
+                                console.log(`Sample 0, Step ${stepCount}: pos=(${testPos.x.toFixed(1)}, ${testPos.z.toFixed(1)}), walls=[${leftWall.toFixed(1)}, ${rightWall.toFixed(1)}]`);
+                            }
+
                             // Check if ray has hit the canyon walls (no clearance - we want actual wall collision)
                             if (testPos.x < leftWall || testPos.x > rightWall) {
                                 collision = true;
                                 // Use the last valid position before collision
                                 testPos = lastValidPos.clone();
+                                if (i === 0) {
+                                    console.log(`Sample 0: COLLISION at step ${stepCount}, distance ${distanceTraveled}, endpoint at (${testPos.x.toFixed(1)}, ${testPos.z.toFixed(1)})`);
+                                }
                             } else {
                                 // This position is valid, save it
                                 lastValidPos = testPos.clone();
@@ -1806,6 +1816,10 @@
                             if (testPos.y < 8 || testPos.y > lowestRim - 10) {
                                 collision = true;
                             }
+                        }
+
+                        if (i === 0 && !collision) {
+                            console.log(`Sample 0: Hit 1000 unit limit, no collision detected`);
                         }
 
                         // Store this sample path

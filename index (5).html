@@ -271,6 +271,7 @@
         let debugPitchCircle = null;
         let debugRollCircle = null;
         let debugCollisionBox = null;
+        let betaDebugLines = [];  // Store debug lines for Beta autopilot
 
         // Plane dimensions - will be calculated from F22 model
         let PLANE_DIMS = {
@@ -1716,6 +1717,13 @@
             } else if (CONFIG.autopilotMode === 'beta') {
                 // BETA MODE: Find longest straight path without crashing
 
+                // Clean up old debug lines
+                betaDebugLines.forEach(line => scene.remove(line));
+                betaDebugLines = [];
+
+                // Store the position where we're sampling from
+                const samplingOrigin = aircraft.position.clone();
+
                 // Test directions around the current position
                 const testAnglesHorizontal = 20;  // Test 20 angles left to right
                 const testAnglesPitch = 10;  // Test 10 pitch angles
@@ -1726,6 +1734,8 @@
 
                 let bestDistance = 0;
                 let bestDirection = null;
+                let bestHorizontalIdx = -1;
+                let bestPitchIdx = -1;
 
                 // Get current canyon position for reference
                 const currentZ = aircraft.position.z;
@@ -1781,7 +1791,44 @@
                         if (distanceTraveled > bestDistance) {
                             bestDistance = distanceTraveled;
                             bestDirection = testDir.clone();
+                            bestHorizontalIdx = h;
+                            bestPitchIdx = p;
                         }
+                    }
+                }
+
+                // Create debug visualization for all test directions
+                for (let h = 0; h < testAnglesHorizontal; h++) {
+                    const horizontalAngle = -maxHorizontalAngle + (h / (testAnglesHorizontal - 1)) * (2 * maxHorizontalAngle);
+
+                    for (let p = 0; p < testAnglesPitch; p++) {
+                        const pitchAngle = -maxPitchAngle + (p / (testAnglesPitch - 1)) * (2 * maxPitchAngle);
+
+                        // Create the same direction vector
+                        const testDir = new THREE.Vector3(
+                            Math.sin(horizontalAngle),
+                            Math.sin(pitchAngle),
+                            -Math.cos(horizontalAngle) * Math.cos(pitchAngle)
+                        ).normalize();
+
+                        // Determine if this is the best direction
+                        const isBest = (h === bestHorizontalIdx && p === bestPitchIdx);
+
+                        // Create a line from sampling origin in this direction
+                        const lineLength = 50;  // Visual length of debug line
+                        const endPoint = samplingOrigin.clone().add(testDir.clone().multiplyScalar(lineLength));
+
+                        const points = [samplingOrigin, endPoint];
+                        const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+                        const lineMaterial = new THREE.LineBasicMaterial({
+                            color: isBest ? 0x00ff00 : 0xff0000,  // Green for best, red for others
+                            opacity: isBest ? 1.0 : 0.3,
+                            transparent: true
+                        });
+
+                        const line = new THREE.Line(lineGeometry, lineMaterial);
+                        scene.add(line);
+                        betaDebugLines.push(line);
                     }
                 }
 

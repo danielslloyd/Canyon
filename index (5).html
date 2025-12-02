@@ -397,6 +397,46 @@
             return base + variation;
         }
 
+        // Calculate actual wall X positions at a given (z, y) coordinate
+        // This matches the wall generation logic in createCanyonSegment
+        function getActualWallPositions(z, y) {
+            const localCenterX = getCanyonCenter(z);
+            const localCrossSection = getCrossSectionShape(z);
+            const localWidthMult = getCanyonWidthMultiplier(z);
+            const localHalfWidth = (CONFIG.canyonWidth / 2) * localWidthMult;
+            const localRimHeight = getCanyonRimHeight(z);
+
+            // Calculate yFrac (normalized height)
+            const yFrac = y / localRimHeight;
+
+            // Wall angle: V-shape has angled walls, U-shape has more vertical walls
+            const baseAngle = 0.15 + localCrossSection * 0.6; // 0.15 to 0.75
+            const wallAngle = baseAngle + noise.fbm(z * 0.01, y * 0.02, 3) * 0.1;
+
+            // Top extension - walls extend outward near the top
+            let topExtension = 0;
+            if (yFrac > 0.7) {
+                const extendFrac = (yFrac - 0.7) / 0.3;
+                topExtension = extendFrac * extendFrac * 60;
+            }
+
+            // Left wall base position (wall leans inward at bottom)
+            const leftBaseX = localCenterX - localHalfWidth + (1 - yFrac) * localHalfWidth * (1 - wallAngle) - topExtension;
+
+            // Fractal displacement (matches LOD scaling from canyon generation)
+            const lodScale = Math.max(1, CONFIG.lodLevel / 6);
+            const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 8));
+            const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
+            const leftX = leftBaseX - leftDisplacement;
+
+            // Right wall base position
+            const rightBaseX = localCenterX + localHalfWidth - (1 - yFrac) * localHalfWidth * (1 - wallAngle) + topExtension;
+            const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
+            const rightX = rightBaseX + rightDisplacement;
+
+            return { leftWall: leftX, rightWall: rightX, canyonCenterX: localCenterX };
+        }
+
         // Calculate optimal flight path - simply follow canyon center (green line)
         // Returns {x, y} position at given z
         function getOptimalFlightPath(z, currentX = 0) {
@@ -1785,17 +1825,16 @@
                             distanceTraveled += stepSize;
                             stepCount++;
 
-                            // Check if this position is inside the canyon
+                            // Get actual wall positions at this (z, y) coordinate
                             const testZ = testPos.z;
-                            const canyonCenterX = getCanyonCenter(testZ);
-                            const widthMultiplier = getCanyonWidthMultiplier(testZ);
-                            const halfWidth = (CONFIG.canyonWidth / 2) * widthMultiplier;
-                            const leftWall = canyonCenterX - halfWidth;
-                            const rightWall = canyonCenterX + halfWidth;
+                            const testY = testPos.y;  // Use actual Y position for height-aware wall calculation
+                            const wallPositions = getActualWallPositions(testZ, testY);
+                            const leftWall = wallPositions.leftWall;
+                            const rightWall = wallPositions.rightWall;
 
                             // Debug first sample only
                             if (i === 0 && stepCount <= 3) {
-                                console.log(`Sample 0, Step ${stepCount}: pos=(${testPos.x.toFixed(1)}, ${testPos.z.toFixed(1)}), walls=[${leftWall.toFixed(1)}, ${rightWall.toFixed(1)}]`);
+                                console.log(`Sample 0, Step ${stepCount}: pos=(${testPos.x.toFixed(1)}, ${testPos.y.toFixed(1)}, ${testPos.z.toFixed(1)}), walls=[${leftWall.toFixed(1)}, ${rightWall.toFixed(1)}]`);
                             }
 
                             // Check if ray has hit the canyon walls (no clearance - we want actual wall collision)
@@ -1804,7 +1843,7 @@
                                 // Use the last valid position before collision
                                 testPos = lastValidPos.clone();
                                 if (i === 0) {
-                                    console.log(`Sample 0: COLLISION at step ${stepCount}, distance ${distanceTraveled}, endpoint at (${testPos.x.toFixed(1)}, ${testPos.z.toFixed(1)})`);
+                                    console.log(`Sample 0: COLLISION at step ${stepCount}, distance ${distanceTraveled}, endpoint at (${testPos.x.toFixed(1)}, ${testPos.y.toFixed(1)}, ${testPos.z.toFixed(1)})`);
                                 }
                             } else {
                                 // This position is valid, save it

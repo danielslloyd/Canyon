@@ -292,6 +292,8 @@
 
         // Beta autopilot tracking
         let betaLastSamplePos = null;  // Track position of last sample
+        let betaBestDistance = 0;  // Track best path distance from last sample
+        let betaStraightAheadDistance = 0;  // Track straight-ahead path distance from last sample
 
         // Position tracking
         let playerZ = 0;
@@ -1793,17 +1795,19 @@
                     const samplingY = aircraft.position.y;  // Lock to current elevation
 
                     // Test parameters
-                    const numSamples = 200;  // 200 samples
-                    const maxAngle = Math.PI / 3;  // ±60 degrees horizontal
+                    const numSamples = 200;  // 200 samples (same density in half the angle)
+                    const maxAngle = Math.PI / 6;  // ±30 degrees horizontal (half of ±60°)
                     const stepSize = 5;  // Step 5 units at a time when testing
 
                     let bestDistance = 0;
+                    let straightAheadDistance = 0;  // Track straight-ahead path distance
                     const samplePaths = [];  // Store all sample paths with their endpoints
 
                     // Generate 2D directions (horizontal fan at current elevation)
                     for (let i = 0; i < numSamples; i++) {
-                        // Random horizontal angle
-                        const angle = -maxAngle + Math.random() * (2 * maxAngle);
+                        // First sample is always straight ahead (angle = 0)
+                        // Remaining samples are random within ±30 degrees
+                        const angle = (i === 0) ? 0 : (-maxAngle + Math.random() * (2 * maxAngle));
 
                         // Create 2D direction (X, Z plane, constant Y)
                         const testDir = new THREE.Vector3(
@@ -1868,6 +1872,11 @@
                             endpoint: testPos.clone()
                         });
 
+                        // If this is the straight-ahead sample (i === 0), save its distance
+                        if (i === 0) {
+                            straightAheadDistance = distanceTraveled;
+                        }
+
                         // If this direction is better, save it
                         if (distanceTraveled > bestDistance) {
                             bestDistance = distanceTraveled;
@@ -1920,6 +1929,11 @@
                         console.log("First sphere at:", newSphereBatch[0].position);
                     }
 
+                    // Store distances for use in steering logic
+                    betaBestDistance = bestDistance;
+                    betaStraightAheadDistance = straightAheadDistance;
+                    console.log(`Beta: Straight-ahead=${straightAheadDistance.toFixed(1)}, Best=${bestDistance.toFixed(1)}, Improvement=${((bestDistance/straightAheadDistance - 1) * 100).toFixed(1)}%`);
+
                     // Create green line for best direction
                     if (bestDirection) {
                         // Find the endpoint for the best direction
@@ -1960,6 +1974,11 @@
                     }
 
                     if (bestDirection) {
+                        // Check if best path is significantly better (>20% further) than straight-ahead
+                        const improvementThreshold = 1.2;  // 20% improvement
+                        const needsAggressiveManeuver = (betaStraightAheadDistance > 0) &&
+                                                       (betaBestDistance > betaStraightAheadDistance * improvementThreshold);
+
                         // Calculate desired roll and pitch to point in bestDirection
                         // Get current nose direction
                         const currentNose = new THREE.Vector3(0, 0, -1);
@@ -1975,21 +1994,34 @@
                         if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
                         else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
                         else {
-                            // Use roll to turn toward target direction
-                            const targetRoll = THREE.MathUtils.clamp(horizontalError * 2, -Math.PI / 2, Math.PI / 2);
-                            roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5);
+                            if (needsAggressiveManeuver) {
+                                // Aggressive maneuver: Roll 90 degrees for knife-edge turn
+                                const targetRoll = (horizontalError > 0) ? Math.PI / 2 : -Math.PI / 2;
+                                roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 8);  // Faster roll rate
+                            } else {
+                                // Normal smooth turn
+                                const targetRoll = THREE.MathUtils.clamp(horizontalError * 2, -Math.PI / 2, Math.PI / 2);
+                                roll = THREE.MathUtils.lerp(roll, targetRoll, delta * 5);
+                            }
                         }
 
                         // User input modifies pitch
                         if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
                         else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
                         else {
-                            // Coordinated turn with pitch
-                            const rollMagnitude = Math.abs(roll);
-                            let turnPitch = rollMagnitude * 0.6;
-
-                            const clampedPitch = THREE.MathUtils.clamp(turnPitch, -0.8, 0.8);
-                            pitch = THREE.MathUtils.lerp(pitch, clampedPitch, delta * 5);
+                            if (needsAggressiveManeuver) {
+                                // Aggressive maneuver: Pitch up hard to reorient toward best direction
+                                const rollMagnitude = Math.abs(roll);
+                                let turnPitch = rollMagnitude * 0.8;  // More aggressive pitch
+                                const clampedPitch = THREE.MathUtils.clamp(turnPitch, -0.8, 0.8);
+                                pitch = THREE.MathUtils.lerp(pitch, clampedPitch, delta * 8);  // Faster pitch rate
+                            } else {
+                                // Normal coordinated turn
+                                const rollMagnitude = Math.abs(roll);
+                                let turnPitch = rollMagnitude * 0.6;
+                                const clampedPitch = THREE.MathUtils.clamp(turnPitch, -0.8, 0.8);
+                                pitch = THREE.MathUtils.lerp(pitch, clampedPitch, delta * 5);
+                            }
                         }
                     }
                 } else {

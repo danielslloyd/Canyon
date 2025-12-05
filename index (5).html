@@ -294,6 +294,7 @@
         let betaLastSamplePos = null;  // Track position of last sample
         let betaBestDistance = 0;  // Track best path distance from last sample
         let betaStraightAheadDistance = 0;  // Track straight-ahead path distance from last sample
+        let betaBestDirection = null;  // Track best direction between samples
 
         // Position tracking
         let playerZ = 0;
@@ -1783,8 +1784,6 @@
                     }
                 }
 
-                let bestDirection = null;
-
                 if (shouldSample) {
                     // Clean up old red debug lines (every sample)
                     betaDebugRedLines.forEach(line => scene.remove(line));
@@ -1797,7 +1796,7 @@
                     // Test parameters
                     const numSamples = 200;  // 200 samples (same density in half the angle)
                     const maxAngle = Math.PI / 6;  // ±30 degrees horizontal (half of ±60°)
-                    const stepSize = 5;  // Step 5 units at a time when testing
+                    const stepSize = 3;  // Step 3 units at a time (smaller for better accuracy)
 
                     let bestDistance = 0;
                     let straightAheadDistance = 0;  // Track straight-ahead path distance
@@ -1836,13 +1835,18 @@
                             const leftWall = wallPositions.leftWall;
                             const rightWall = wallPositions.rightWall;
 
+                            // Account for plane wingspan (half-wingspan on each side)
+                            const clearance = PLANE_DIMS.wingspan + 2;  // Wingspan + small safety margin
+                            const leftWingtip = testPos.x - clearance;
+                            const rightWingtip = testPos.x + clearance;
+
                             // Debug first sample only
                             if (i === 0 && stepCount <= 3) {
-                                console.log(`Sample 0, Step ${stepCount}: pos=(${testPos.x.toFixed(1)}, ${testPos.y.toFixed(1)}, ${testPos.z.toFixed(1)}), walls=[${leftWall.toFixed(1)}, ${rightWall.toFixed(1)}]`);
+                                console.log(`Sample 0, Step ${stepCount}: pos=(${testPos.x.toFixed(1)}, ${testPos.y.toFixed(1)}, ${testPos.z.toFixed(1)}), walls=[${leftWall.toFixed(1)}, ${rightWall.toFixed(1)}], wingtips=[${leftWingtip.toFixed(1)}, ${rightWingtip.toFixed(1)}]`);
                             }
 
-                            // Check if ray has hit the canyon walls (no clearance - we want actual wall collision)
-                            if (testPos.x < leftWall || testPos.x > rightWall) {
+                            // Check if plane (with wingspan) would hit the canyon walls
+                            if (leftWingtip < leftWall || rightWingtip > rightWall) {
                                 collision = true;
                                 // Use the last valid position before collision
                                 testPos = lastValidPos.clone();
@@ -1880,7 +1884,7 @@
                         // If this direction is better, save it
                         if (distanceTraveled > bestDistance) {
                             bestDistance = distanceTraveled;
-                            bestDirection = testDir.clone();
+                            betaBestDirection = testDir.clone();
                         }
                     }
 
@@ -1889,6 +1893,8 @@
 
                     for (let i = 0; i < samplePaths.length; i++) {
                         const sample = samplePaths[i];
+                        const isBestSample = betaBestDirection && sample.direction.equals(betaBestDirection);
+
                         const points = [samplingOrigin, sample.endpoint];
                         const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
                         const lineMaterial = new THREE.LineBasicMaterial({
@@ -1901,10 +1907,10 @@
                         scene.add(line);
                         betaDebugRedLines.push(line);
 
-                        // Add sphere at collision point
+                        // Add sphere at collision point - green for best, red for others
                         const sphereGeometry = new THREE.SphereGeometry(3, 8, 8);  // Radius 3
                         const sphereMaterial = new THREE.MeshBasicMaterial({
-                            color: 0xff0000,  // Red to match line
+                            color: isBestSample ? 0x00ff00 : 0xff0000,  // Green for best, red for others
                             transparent: true,
                             opacity: 0.6
                         });
@@ -1935,9 +1941,9 @@
                     console.log(`Beta: Straight-ahead=${straightAheadDistance.toFixed(1)}, Best=${bestDistance.toFixed(1)}, Improvement=${((bestDistance/straightAheadDistance - 1) * 100).toFixed(1)}%`);
 
                     // Create green line for best direction
-                    if (bestDirection) {
+                    if (betaBestDirection) {
                         // Find the endpoint for the best direction
-                        const bestSample = samplePaths.find(s => s.direction.equals(bestDirection));
+                        const bestSample = samplePaths.find(s => s.direction.equals(betaBestDirection));
                         if (bestSample) {
                             const points = [samplingOrigin, bestSample.endpoint];
                             const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
@@ -1962,31 +1968,31 @@
                 }
 
                 // Point the jet toward the best direction (use last computed direction if not sampling this frame)
-                if (bestDirection || betaDebugGreenLines.length > 0) {
+                if (betaBestDirection || betaDebugGreenLines.length > 0) {
                     // Use the most recent green line's direction if we didn't just sample
-                    if (!bestDirection && betaDebugGreenLines.length > 0) {
+                    if (!betaBestDirection && betaDebugGreenLines.length > 0) {
                         // Extract direction from the most recent green line
                         const recentGreenLine = betaDebugGreenLines[betaDebugGreenLines.length - 1];
                         const positions = recentGreenLine.geometry.attributes.position.array;
                         const start = new THREE.Vector3(positions[0], positions[1], positions[2]);
                         const end = new THREE.Vector3(positions[3], positions[4], positions[5]);
-                        bestDirection = end.clone().sub(start).normalize();
+                        betaBestDirection = end.clone().sub(start).normalize();
                     }
 
-                    if (bestDirection) {
+                    if (betaBestDirection) {
                         // Check if best path is significantly better (>20% further) than straight-ahead
                         const improvementThreshold = 1.2;  // 20% improvement
                         const needsAggressiveManeuver = (betaStraightAheadDistance > 0) &&
                                                        (betaBestDistance > betaStraightAheadDistance * improvementThreshold);
 
-                        // Calculate desired roll and pitch to point in bestDirection
+                        // Calculate desired roll and pitch to point in betaBestDirection
                         // Get current nose direction
                         const currentNose = new THREE.Vector3(0, 0, -1);
                         currentNose.applyQuaternion(aircraft.quaternion);
 
                         // Calculate angle differences
                         // Horizontal angle (for roll)
-                        const horizontalTarget = Math.atan2(bestDirection.x, -bestDirection.z);
+                        const horizontalTarget = Math.atan2(betaBestDirection.x, -betaBestDirection.z);
                         const horizontalCurrent = Math.atan2(currentNose.x, -currentNose.z);
                         const horizontalError = horizontalTarget - horizontalCurrent;
 

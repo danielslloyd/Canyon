@@ -209,8 +209,8 @@
                 <label for="visual-debugging">Visual Debugging</label>
             </div>
 
-            <label>Replay Backtrack Distance: <span id="replay-backtrack-value" class="value-display">100</span> units</label>
-            <input type="range" id="replay-backtrack" min="20" max="300" step="10" value="100">
+            <label>Replay Backtrack Distance: <span id="replay-backtrack-value" class="value-display">5</span> units</label>
+            <input type="range" id="replay-backtrack" min="1" max="10" step="1" value="5">
 
             <div class="checkbox-container">
                 <input type="checkbox" id="reroll-canyon" checked>
@@ -261,7 +261,7 @@
             timeOfDay: 'morning',
             autopilotMode: 'beta',  // 'off', 'alpha', or 'beta'
             visualDebugging: false,
-            replayBacktrackDistance: 100,  // Distance to backtrack for replay
+            replayBacktrackDistance: 5,  // Distance (in units) to backtrack for replay
             rerollCanyonOnRestart: true
         };
 
@@ -272,9 +272,8 @@
         let gameOver = false;
         let paused = false;
 
-        // Replay system - rolling buffer of recent states
+        // Replay system - rolling buffer of recent states (only within backtrack distance)
         const stateHistory = [];
-        const maxHistorySize = 1000;  // Keep last 1000 states
         let crashState = null;  // Store state at crash
 
         // Three.js components
@@ -2416,7 +2415,7 @@
 
             playerZ = aircraft.position.z;
 
-            // Capture state for replay system (rolling buffer)
+            // Capture state for replay system (distance-based rolling buffer)
             if (!gameOver) {
                 const currentState = {
                     position: aircraft.position.clone(),
@@ -2430,8 +2429,11 @@
                     flightSpeed: CONFIG.flightSpeed
                 };
                 stateHistory.push(currentState);
-                // Keep buffer size limited
-                if (stateHistory.length > maxHistorySize) {
+
+                // Remove states that are too far back (only keep within backtrack distance)
+                const backtrackDistance = CONFIG.replayBacktrackDistance;
+                while (stateHistory.length > 0 &&
+                       (playerZ - stateHistory[0].playerZ) > backtrackDistance) {
                     stateHistory.shift();
                 }
             }

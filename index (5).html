@@ -186,8 +186,8 @@
                 <option value="yz">Y+Z axes</option>
             </select>
 
-            <label>Flight Speed: <span id="speed-value" class="value-display">0.5</span>x</label>
-            <input type="range" id="flight-speed" min="0.5" max="3" step="0.1" value="0.5">
+            <label>Flight Speed: <span id="speed-value" class="value-display">5</span>x</label>
+            <input type="range" id="flight-speed" min="0.5" max="10" step="0.1" value="5">
 
             <label>Autopilot Mode:</label>
             <select id="autopilot-mode">
@@ -203,6 +203,11 @@
 
             <label>Enemy Difficulty: <span id="enemy-diff-value" class="value-display">5</span></label>
             <input type="range" id="enemy-difficulty" min="1" max="10" value="5">
+
+            <div class="checkbox-container">
+                <input type="checkbox" id="visual-debugging">
+                <label for="visual-debugging">Visual Debugging</label>
+            </div>
 
             <button id="apply-settings">Apply Settings</button>
         </div>
@@ -241,11 +246,12 @@
             lodLevel: 12,
             ringFrequency: 0,
             ringRotationAxis: 'z',  // Z-axis is correct
-            flightSpeed: 0.5,
+            flightSpeed: 5,
             enemiesEnabled: false,
             enemyDifficulty: 5,
             timeOfDay: 'morning',
-            autopilotMode: 'beta'  // 'off', 'alpha', or 'beta'
+            autopilotMode: 'beta',  // 'off', 'alpha', or 'beta'
+            visualDebugging: false
         };
 
         // Game State
@@ -371,14 +377,14 @@
         // Get canyon center position at a given Z
         function getCanyonCenter(z) {
             // Create pronounced S-curves with varying radius and angle
-            // Primary large S-curves
-            const curve1 = pathNoise.noise2D(z * 0.0015, 0) * 80;
+            // Primary large S-curves (increased amplitude for sharper curves)
+            const curve1 = pathNoise.noise2D(z * 0.0015, 0) * 120;  // Increased from 80
             // Secondary curves for variation in turn radius
-            const curve2 = pathNoise.noise2D(z * 0.004, 100) * 40;
+            const curve2 = pathNoise.noise2D(z * 0.004, 100) * 60;  // Increased from 40
             // Tertiary detail curves
-            const curve3 = pathNoise.noise2D(z * 0.01, 200) * 15;
+            const curve3 = pathNoise.noise2D(z * 0.01, 200) * 25;  // Increased from 15
             // Extra variation in turn sharpness
-            const curve4 = Math.sin(z * 0.002 + pathNoise.noise2D(z * 0.001, 300) * 2) * 50;
+            const curve4 = Math.sin(z * 0.002 + pathNoise.noise2D(z * 0.001, 300) * 2) * 70;  // Increased from 50
 
             return curve1 + curve2 + curve3 + curve4;
         }
@@ -428,14 +434,13 @@
             const leftBaseX = localCenterX - localHalfWidth + (1 - yFrac) * localHalfWidth * (1 - wallAngle) - topExtension;
 
             // Fractal displacement (matches LOD scaling from canyon generation)
-            const lodScale = Math.max(1, CONFIG.lodLevel / 6);
-            const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 8));
-            const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
+            const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 16));  // Higher octave range for more detail
+            const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, octaves, 0.5, 2.0) * 12;  // Constant displacement magnitude
             const leftX = leftBaseX - leftDisplacement;
 
             // Right wall base position
             const rightBaseX = localCenterX + localHalfWidth - (1 - yFrac) * localHalfWidth * (1 - wallAngle) + topExtension;
-            const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
+            const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, octaves, 0.5, 2.0) * 12;  // Same constant displacement
             const rightX = rightBaseX + rightDisplacement;
 
             return { leftWall: leftX, rightWall: rightX, canyonCenterX: localCenterX };
@@ -667,6 +672,9 @@
                 scene.remove(debugRollCircle);
             }
 
+            // Don't create new circles if debugging is disabled
+            if (!CONFIG.visualDebugging) return;
+
             // Calculate bounding sphere radius for the plane
             const planeRadius = 8;  // Approximate radius for visualization
 
@@ -734,6 +742,9 @@
                 scene.remove(debugCollisionBox);
             }
 
+            // Don't create new collision box if debugging is disabled
+            if (!CONFIG.visualDebugging) return;
+
             debugCollisionBox = new THREE.Group();
 
             // Create tight bounding box using PLANE_DIMS
@@ -774,6 +785,9 @@
             if (transitionPathLine) {
                 scene.remove(transitionPathLine);
             }
+
+            // Don't create new lines if debugging is disabled
+            if (!CONFIG.visualDebugging) return;
 
             const startZ = aircraft.position.z + 50;  // Start a bit behind
             const endZ = aircraft.position.z - 800;   // Extend far ahead
@@ -1114,16 +1128,15 @@
                     // Left wall X position (wall leans inward at bottom for V, straighter for U)
                     const leftBaseX = localCenterX - localHalfWidth + (1 - yFrac) * localHalfWidth * (1 - wallAngle) - topExtension;
 
-                    // Scale fractal detail with LOD: more octaves = more crinkly
-                    // Base displacement scales with LOD level
-                    const lodScale = Math.max(1, CONFIG.lodLevel / 6);  // Scale factor based on LOD
-                    const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 8));  // Use LOD as octave count
-                    const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
+                    // Scale fractal detail with LOD: more octaves = more crinkly detail
+                    // LOD controls octave count for deeper fractality, not spike size
+                    const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 16));  // Higher octave range for more detail
+                    const leftDisplacement = noise.fbm(z * 0.01, y * 0.05, octaves, 0.5, 2.0) * 12;  // Constant displacement magnitude
                     const leftX = leftBaseX - leftDisplacement;
 
                     // Right wall X position
                     const rightBaseX = localCenterX + localHalfWidth - (1 - yFrac) * localHalfWidth * (1 - wallAngle) + topExtension;
-                    const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, octaves, 0.5, 2.0) * (12 * lodScale);
+                    const rightDisplacement = noise.fbm(z * 0.01 + 100, y * 0.05, octaves, 0.5, 2.0) * 12;  // Same constant displacement
                     const rightX = rightBaseX + rightDisplacement;
 
                     leftVerts.push(leftX, y, z);
@@ -1165,10 +1178,9 @@
                         const baseHeight = vShapeFloor * (1 - localCrossSection) + uShapeFloor * localCrossSection;
 
                         // Add fractal detail - floor is never perfectly flat
-                        // Scale with LOD for more detailed terrain at higher settings
-                        const lodScale = Math.max(1, CONFIG.lodLevel / 6);
-                        const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 8));
-                        const detail = noise.fbm(z * 0.01, x * 0.02, octaves, 0.5, 2.0) * (4 * lodScale);
+                        // LOD controls detail level through octaves, not spike size
+                        const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 16));  // Higher octave range for more detail
+                        const detail = noise.fbm(z * 0.01, x * 0.02, octaves, 0.5, 2.0) * 4;  // Constant displacement
                         height = baseHeight + detail;
                         // Brown rock color
                         floorColors.push(0.4, 0.26, 0.13); // RGB for rock
@@ -1451,6 +1463,7 @@
             CONFIG.autopilotMode = document.getElementById('autopilot-mode').value;
             CONFIG.enemiesEnabled = document.getElementById('enemies-enabled').checked;
             CONFIG.enemyDifficulty = parseInt(document.getElementById('enemy-difficulty').value);
+            CONFIG.visualDebugging = document.getElementById('visual-debugging').checked;
 
             // Update lighting and skybox
             updateSkybox();
@@ -1650,6 +1663,52 @@
         }
 
         function updateAircraft(delta) {
+            // Emergency wing collision avoidance - check straight ahead from wingtips
+            let emergencyRollLeft = false;
+            let emergencyRollRight = false;
+
+            // Short-range wing collision detection (looking straight ahead)
+            const wingLookAhead = 30;  // Short distance ahead
+            const forwardDir = new THREE.Vector3(0, 0, -1);
+            forwardDir.applyQuaternion(aircraft.quaternion);
+
+            // Get wingtip positions
+            const leftWingLocal = new THREE.Vector3(PLANE_DIMS.wingspan, 0, 0);
+            leftWingLocal.applyQuaternion(aircraft.quaternion);
+            const leftWingtip = aircraft.position.clone().add(leftWingLocal);
+
+            const rightWingLocal = new THREE.Vector3(-PLANE_DIMS.wingspan, 0, 0);
+            rightWingLocal.applyQuaternion(aircraft.quaternion);
+            const rightWingtip = aircraft.position.clone().add(rightWingLocal);
+
+            // Check nose straight ahead
+            const noseCheckPos = aircraft.position.clone().add(forwardDir.clone().multiplyScalar(wingLookAhead));
+            const noseWalls = getActualWallPositions(noseCheckPos.z, noseCheckPos.y);
+            const noseClearance = 5;
+            const noseHitsWall = (noseCheckPos.x - noseClearance < noseWalls.leftWall) ||
+                                 (noseCheckPos.x + noseClearance > noseWalls.rightWall);
+
+            // Check left wing straight ahead
+            const leftWingCheckPos = leftWingtip.clone().add(forwardDir.clone().multiplyScalar(wingLookAhead));
+            const leftWingWalls = getActualWallPositions(leftWingCheckPos.z, leftWingCheckPos.y);
+            const wingClearance = 3;
+            const leftWingHitsWall = (leftWingCheckPos.x - wingClearance < leftWingWalls.leftWall) ||
+                                     (leftWingCheckPos.x + wingClearance > leftWingWalls.rightWall);
+
+            // Check right wing straight ahead
+            const rightWingCheckPos = rightWingtip.clone().add(forwardDir.clone().multiplyScalar(wingLookAhead));
+            const rightWingWalls = getActualWallPositions(rightWingCheckPos.z, rightWingCheckPos.y);
+            const rightWingHitsWall = (rightWingCheckPos.x - wingClearance < rightWingWalls.leftWall) ||
+                                      (rightWingCheckPos.x + wingClearance > rightWingWalls.rightWall);
+
+            // If nose is clear but wing will hit, roll violently to raise that wing
+            if (!noseHitsWall && leftWingHitsWall) {
+                emergencyRollLeft = true;  // Roll left to raise left wing
+            }
+            if (!noseHitsWall && rightWingHitsWall) {
+                emergencyRollRight = true;  // Roll right to raise right wing
+            }
+
             // Look ahead to follow the optimal path
             const lookAheadDistance = 150;
             const targetZ = aircraft.position.z - lookAheadDistance;
@@ -1679,7 +1738,13 @@
                 // User input modifies roll (2x faster: 4 instead of 2)
                 if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);  // 120 degrees
                 else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);   // 120 degrees
-                else {
+                else if (emergencyRollLeft) {
+                    // Emergency: roll left violently to raise left wing
+                    roll = Math.max(roll - 8 * delta, -Math.PI / 2);  // Violent roll left
+                } else if (emergencyRollRight) {
+                    // Emergency: roll right violently to raise right wing
+                    roll = Math.min(roll + 8 * delta, Math.PI / 2);  // Violent roll right
+                } else {
                     // Determine desired roll based on situation
                     let targetRoll = 0;
 
@@ -1790,6 +1855,16 @@
                     betaDebugRedLines.forEach(line => scene.remove(line));
                     betaDebugRedLines = [];
 
+                    // Clean up old spheres if debugging is disabled
+                    if (!CONFIG.visualDebugging) {
+                        betaDebugSphereBatches.forEach(batch => {
+                            batch.forEach(sphere => scene.remove(sphere));
+                        });
+                        betaDebugSphereBatches = [];
+                        betaDebugGreenLines.forEach(line => scene.remove(line));
+                        betaDebugGreenLines = [];
+                    }
+
                     // Store the position where we're sampling from
                     const samplingOrigin = aircraft.position.clone();
                     const samplingY = aircraft.position.y;  // Lock to current elevation
@@ -1899,50 +1974,52 @@
                     }
 
                     // Create debug visualization for all sample paths (red lines + collision spheres)
-                    const newSphereBatch = [];  // New batch for this sample
+                    if (CONFIG.visualDebugging) {
+                        const newSphereBatch = [];  // New batch for this sample
 
-                    for (let i = 0; i < samplePaths.length; i++) {
-                        const sample = samplePaths[i];
-                        const isBestSample = betaBestDirection && sample.direction.equals(betaBestDirection);
+                        for (let i = 0; i < samplePaths.length; i++) {
+                            const sample = samplePaths[i];
+                            const isBestSample = betaBestDirection && sample.direction.equals(betaBestDirection);
 
-                        const points = [samplingOrigin, sample.endpoint];
-                        const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
-                        const lineMaterial = new THREE.LineBasicMaterial({
-                            color: 0xff0000,  // Red for all samples
-                            opacity: 0.3,
-                            transparent: true
-                        });
+                            const points = [samplingOrigin, sample.endpoint];
+                            const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+                            const lineMaterial = new THREE.LineBasicMaterial({
+                                color: 0xff0000,  // Red for all samples
+                                opacity: 0.3,
+                                transparent: true
+                            });
 
-                        const line = new THREE.Line(lineGeometry, lineMaterial);
-                        scene.add(line);
-                        betaDebugRedLines.push(line);
+                            const line = new THREE.Line(lineGeometry, lineMaterial);
+                            scene.add(line);
+                            betaDebugRedLines.push(line);
 
-                        // Add sphere at collision point - green for best, red for others
-                        const sphereGeometry = new THREE.SphereGeometry(3, 8, 8);  // Radius 3
-                        const sphereMaterial = new THREE.MeshBasicMaterial({
-                            color: isBestSample ? 0x00ff00 : 0xff0000,  // Green for best, red for others
-                            transparent: true,
-                            opacity: 0.6
-                        });
-                        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-                        sphere.position.copy(sample.endpoint);
-                        scene.add(sphere);
-                        newSphereBatch.push(sphere);
-                    }
+                            // Add sphere at collision point - green for best, red for others
+                            const sphereGeometry = new THREE.SphereGeometry(3, 8, 8);  // Radius 3
+                            const sphereMaterial = new THREE.MeshBasicMaterial({
+                                color: isBestSample ? 0x00ff00 : 0xff0000,  // Green for best, red for others
+                                transparent: true,
+                                opacity: 0.6
+                            });
+                            const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                            sphere.position.copy(sample.endpoint);
+                            scene.add(sphere);
+                            newSphereBatch.push(sphere);
+                        }
 
-                    // Add this batch to our collection
-                    betaDebugSphereBatches.push(newSphereBatch);
+                        // Add this batch to our collection
+                        betaDebugSphereBatches.push(newSphereBatch);
 
-                    // Keep only last 2 batches
-                    if (betaDebugSphereBatches.length > 2) {
-                        const oldBatch = betaDebugSphereBatches.shift();
-                        oldBatch.forEach(sphere => scene.remove(sphere));
-                    }
+                        // Keep only last 2 batches
+                        if (betaDebugSphereBatches.length > 2) {
+                            const oldBatch = betaDebugSphereBatches.shift();
+                            oldBatch.forEach(sphere => scene.remove(sphere));
+                        }
 
-                    console.log("Beta autopilot: Created", newSphereBatch.length, "collision spheres");
-                    console.log("Total sphere batches:", betaDebugSphereBatches.length);
-                    if (newSphereBatch.length > 0) {
-                        console.log("First sphere at:", newSphereBatch[0].position);
+                        console.log("Beta autopilot: Created", newSphereBatch.length, "collision spheres");
+                        console.log("Total sphere batches:", betaDebugSphereBatches.length);
+                        if (newSphereBatch.length > 0) {
+                            console.log("First sphere at:", newSphereBatch[0].position);
+                        }
                     }
 
                     // Store distances and angle for use in steering logic
@@ -1952,7 +2029,7 @@
                     console.log(`Beta: Straight-ahead=${straightAheadDistance.toFixed(1)}, Best=${bestDistance.toFixed(1)}, BestAngle=${(bestAngle * 180 / Math.PI).toFixed(2)}°, Improvement=${((bestDistance/straightAheadDistance - 1) * 100).toFixed(1)}%`);
 
                     // Create green line for best direction
-                    if (betaBestDirection) {
+                    if (CONFIG.visualDebugging && betaBestDirection) {
                         // Find the endpoint for the best direction
                         const bestSample = samplePaths.find(s => s.direction.equals(betaBestDirection));
                         if (bestSample) {
@@ -1982,7 +2059,13 @@
                 // User input always takes priority
                 if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
                 else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
-                else {
+                else if (emergencyRollLeft) {
+                    // Emergency: roll left violently to raise left wing
+                    roll = Math.max(roll - 8 * delta, -Math.PI / 2);  // Violent roll left
+                } else if (emergencyRollRight) {
+                    // Emergency: roll right violently to raise right wing
+                    roll = Math.min(roll + 8 * delta, Math.PI / 2);  // Violent roll right
+                } else {
                     // Only steer if we have valid sampling data
                     if (betaStraightAheadDistance > 0) {
                         // Only adjust if best path is better than straight ahead
@@ -2026,7 +2109,13 @@
                 // 2x faster roll: 4 instead of 2, 120-degree limit: 2.1 instead of 1.0
                 if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
                 else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
-                else roll *= 0.95;  // Decay roll when not actively controlling
+                else if (emergencyRollLeft) {
+                    // Emergency: roll left violently to raise left wing
+                    roll = Math.max(roll - 8 * delta, -Math.PI / 2);  // Violent roll left
+                } else if (emergencyRollRight) {
+                    // Emergency: roll right violently to raise right wing
+                    roll = Math.min(roll + 8 * delta, Math.PI / 2);  // Violent roll right
+                } else roll *= 0.95;  // Decay roll when not actively controlling
 
                 // Don't accumulate yaw - it causes spinning
                 yaw *= 0.98;  // Slowly decay yaw

@@ -1927,6 +1927,11 @@
                         testAngles.push(deg * Math.PI / 180);   // Right
                         testAngles.push(-deg * Math.PI / 180);  // Left
                     }
+                    // Always add wider angle samples for immediate aggressive banking detection
+                    testAngles.push(5 * Math.PI / 180);   // +5° right
+                    testAngles.push(-5 * Math.PI / 180);  // -5° left
+                    testAngles.push(10 * Math.PI / 180);  // +10° right (very aggressive)
+                    testAngles.push(-10 * Math.PI / 180); // -10° left (very aggressive)
 
                     // Generate 2D directions (horizontal fan at current elevation)
                     for (let i = 0; i < testAngles.length; i++) {

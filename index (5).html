@@ -209,12 +209,21 @@
                 <label for="visual-debugging">Visual Debugging</label>
             </div>
 
+            <label>Replay Backtrack Distance: <span id="replay-backtrack-value" class="value-display">100</span> units</label>
+            <input type="range" id="replay-backtrack" min="20" max="300" step="10" value="100">
+
+            <div class="checkbox-container">
+                <input type="checkbox" id="reroll-canyon" checked>
+                <label for="reroll-canyon">Re-roll Canyon on Restart</label>
+            </div>
+
             <button id="apply-settings">Apply Settings</button>
         </div>
 
         <div id="game-over">
             <h2>CRASHED!</h2>
             <p>Final Score: <span id="final-score">0</span></p>
+            <button id="replay-btn">Replay (Debug)</button>
             <button id="restart-btn">Restart</button>
         </div>
 
@@ -251,7 +260,9 @@
             enemyDifficulty: 5,
             timeOfDay: 'morning',
             autopilotMode: 'beta',  // 'off', 'alpha', or 'beta'
-            visualDebugging: false
+            visualDebugging: false,
+            replayBacktrackDistance: 100,  // Distance to backtrack for replay
+            rerollCanyonOnRestart: true
         };
 
         // Game State
@@ -260,6 +271,11 @@
         let health = 100;
         let gameOver = false;
         let paused = false;
+
+        // Replay system - rolling buffer of recent states
+        const stateHistory = [];
+        const maxHistorySize = 1000;  // Keep last 1000 states
+        let crashState = null;  // Store state at crash
 
         // Three.js components
         // This work is based on "F22 (Remaster)" (https://sketchfab.com/3d-models/f22-remaster-bf6df655e73e4d4b9deac6cfee85564c) by CreaDX (https://sketchfab.com/CreaDX) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
@@ -371,8 +387,8 @@
             }
         }
 
-        const noise = new SimplexNoise(12345);
-        const pathNoise = new SimplexNoise(67890);
+        let noise = new SimplexNoise(12345);
+        let pathNoise = new SimplexNoise(67890);
 
         // Get canyon center position at a given Z
         function getCanyonCenter(z) {
@@ -1464,6 +1480,7 @@
             // Settings controls
             document.getElementById('apply-settings').addEventListener('click', applySettings);
             document.getElementById('restart-btn').addEventListener('click', restartGame);
+            document.getElementById('replay-btn').addEventListener('click', replayGame);
 
             // Value display updates
             document.getElementById('canyon-lod').addEventListener('input', (e) => {
@@ -1480,6 +1497,10 @@
 
             document.getElementById('enemy-difficulty').addEventListener('input', (e) => {
                 document.getElementById('enemy-diff-value').textContent = e.target.value;
+            });
+
+            document.getElementById('replay-backtrack').addEventListener('input', (e) => {
+                document.getElementById('replay-backtrack-value').textContent = e.target.value;
             });
         }
 
@@ -1505,6 +1526,8 @@
             CONFIG.enemiesEnabled = document.getElementById('enemies-enabled').checked;
             CONFIG.enemyDifficulty = parseInt(document.getElementById('enemy-difficulty').value);
             CONFIG.visualDebugging = document.getElementById('visual-debugging').checked;
+            CONFIG.replayBacktrackDistance = parseInt(document.getElementById('replay-backtrack').value);
+            CONFIG.rerollCanyonOnRestart = document.getElementById('reroll-canyon').checked;
 
             // Update lighting and skybox
             updateSkybox();
@@ -1552,7 +1575,95 @@
             bullets = [];
             enemyBullets = [];
 
+            // Clear state history
+            stateHistory.length = 0;
+            crashState = null;
+
+            // Re-roll canyon if enabled
+            if (CONFIG.rerollCanyonOnRestart) {
+                // Recreate noise generators with new random seeds
+                const newSeed1 = Math.floor(Math.random() * 2147483647);
+                const newSeed2 = Math.floor(Math.random() * 2147483647);
+                noise = new SimplexNoise(newSeed1);
+                pathNoise = new SimplexNoise(newSeed2);
+                console.log("Canyon re-rolled with new seeds:", newSeed1, newSeed2);
+            }
+
             // Regenerate canyon
+            regenerateCanyon();
+
+            // Update UI
+            updateHUD();
+            document.getElementById('game-over').style.display = 'none';
+        }
+
+        function replayGame() {
+            if (!crashState || stateHistory.length === 0) {
+                console.log("No crash state or history available for replay");
+                return;
+            }
+
+            // Find the state that's backtrack distance before the crash
+            const backtrackDistance = CONFIG.replayBacktrackDistance;
+            let replayState = null;
+
+            // Search backwards through history to find state N units before crash
+            for (let i = stateHistory.length - 1; i >= 0; i--) {
+                const state = stateHistory[i];
+                const distanceFromCrash = crashState.playerZ - state.playerZ;
+                if (distanceFromCrash >= backtrackDistance) {
+                    replayState = state;
+                    break;
+                }
+            }
+
+            // If not found (history not long enough), use earliest state
+            if (!replayState && stateHistory.length > 0) {
+                replayState = stateHistory[0];
+            }
+
+            if (!replayState) {
+                console.log("No suitable replay state found");
+                return;
+            }
+
+            console.log(`Replaying from ${backtrackDistance} units before crash`);
+
+            // Restore state
+            score = replayState.score;
+            health = replayState.health;
+            gameOver = false;
+            playerZ = replayState.playerZ;
+            pitch = replayState.pitch;
+            roll = replayState.roll;
+            yaw = replayState.yaw;
+
+            // Restore aircraft position and rotation
+            aircraft.position.copy(replayState.position);
+            aircraft.quaternion.copy(replayState.quaternion);
+
+            // Clear enemies and bullets
+            enemies.forEach(e => scene.remove(e));
+            bullets.forEach(b => scene.remove(b));
+            enemyBullets.forEach(b => scene.remove(b));
+            enemies = [];
+            bullets = [];
+            enemyBullets = [];
+
+            // Keep the state history up to the replay point
+            const replayIndex = stateHistory.indexOf(replayState);
+            if (replayIndex >= 0) {
+                stateHistory.length = replayIndex + 1;
+            }
+
+            // Enable visual debugging and set speed to 0.5x for replay
+            CONFIG.visualDebugging = true;
+            CONFIG.flightSpeed = 0.5;
+            document.getElementById('visual-debugging').checked = true;
+            document.getElementById('flight-speed').value = 0.5;
+            document.getElementById('speed-value').textContent = '0.5';
+
+            // Regenerate visible canyon segments around current position
             regenerateCanyon();
 
             // Update UI
@@ -1699,6 +1810,20 @@
 
         function triggerDeath() {
             gameOver = true;
+
+            // Save crash state for replay
+            crashState = {
+                position: aircraft.position.clone(),
+                quaternion: aircraft.quaternion.clone(),
+                pitch: pitch,
+                roll: roll,
+                yaw: yaw,
+                playerZ: playerZ,
+                score: score,
+                health: health,
+                flightSpeed: CONFIG.flightSpeed
+            };
+
             document.getElementById('final-score').textContent = score;
             document.getElementById('game-over').style.display = 'block';
         }
@@ -2290,6 +2415,26 @@
             aircraft.position.y = Math.max(8, Math.min(lowestRim - 10, aircraft.position.y));
 
             playerZ = aircraft.position.z;
+
+            // Capture state for replay system (rolling buffer)
+            if (!gameOver) {
+                const currentState = {
+                    position: aircraft.position.clone(),
+                    quaternion: aircraft.quaternion.clone(),
+                    pitch: pitch,
+                    roll: roll,
+                    yaw: yaw,
+                    playerZ: playerZ,
+                    score: score,
+                    health: health,
+                    flightSpeed: CONFIG.flightSpeed
+                };
+                stateHistory.push(currentState);
+                // Keep buffer size limited
+                if (stateHistory.length > maxHistorySize) {
+                    stateHistory.shift();
+                }
+            }
 
             // Update camera to follow aircraft (not canyon)
             camera.position.x = aircraft.position.x;

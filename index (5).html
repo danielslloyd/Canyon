@@ -522,15 +522,16 @@
 
             // Set up fog for morning
             if (CONFIG.timeOfDay === 'morning') {
-                // Exponential fog that follows camera automatically (reduced density)
-                scene.fog = new THREE.FogExp2(0xD8E8E8, 0.0015);
+                // Exponential fog that follows camera automatically
+                // Use a color that blends better with the sky and water (light blue-gray)
+                scene.fog = new THREE.FogExp2(0xB8D8E8, 0.0012);  // Lighter, more blue-tinted fog, reduced density
             } else {
                 scene.fog = null;
             }
 
             // Gradient sky sphere
             const skyGeo = new THREE.SphereGeometry(2000, 32, 32);
-            const skyMat = new THREE.ShaderMaterial({
+            const skyMatConfig = {
                 uniforms: THREE.UniformsUtils.merge([
                     THREE.UniformsLib.fog,
                     {
@@ -542,10 +543,17 @@
                 ]),
                 vertexShader: `
                     varying vec3 vWorldPosition;
+                    #ifdef USE_FOG
+                        varying float vFogDepth;
+                    #endif
                     void main() {
                         vec4 worldPosition = modelMatrix * vec4(position, 1.0);
                         vWorldPosition = worldPosition.xyz;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        gl_Position = projectionMatrix * mvPosition;
+                        #ifdef USE_FOG
+                            vFogDepth = -mvPosition.z;
+                        #endif
                     }
                 `,
                 fragmentShader: `
@@ -554,15 +562,48 @@
                     uniform float offset;
                     uniform float exponent;
                     varying vec3 vWorldPosition;
+
+                    #ifdef USE_FOG
+                        uniform vec3 fogColor;
+                        varying float vFogDepth;
+                        #ifdef FOG_EXP2
+                            uniform float fogDensity;
+                        #else
+                            uniform float fogNear;
+                            uniform float fogFar;
+                        #endif
+                    #endif
+
                     void main() {
                         float h = normalize(vWorldPosition + offset).y;
-                        gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
+                        vec3 skyColor = mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0));
+
+                        #ifdef USE_FOG
+                            float fogFactor = 1.0;
+                            #ifdef FOG_EXP2
+                                fogFactor = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);
+                            #else
+                                fogFactor = smoothstep(fogNear, fogFar, vFogDepth);
+                            #endif
+                            skyColor = mix(skyColor, fogColor, fogFactor);
+                        #endif
+
+                        gl_FragColor = vec4(skyColor, 1.0);
                     }
                 `,
                 side: THREE.BackSide,
                 fog: true
-            });
+            };
 
+            // Add fog defines if fog is enabled
+            if (CONFIG.timeOfDay === 'morning') {
+                skyMatConfig.defines = {
+                    USE_FOG: '',
+                    FOG_EXP2: ''
+                };
+            }
+
+            const skyMat = new THREE.ShaderMaterial(skyMatConfig);
             const sky = new THREE.Mesh(skyGeo, skyMat);
             sky.name = 'skybox';
 
@@ -1973,6 +2014,82 @@
                         }
                     }
 
+                    // Extended search: If best angle is at the edge, keep searching in that direction
+                    const edgeThreshold = 0.9; // 90% of max angle is considered "at edge"
+                    const maxAngleRad = maxAngleDegrees * Math.PI / 180;
+                    const isAtEdge = Math.abs(bestAngle) >= maxAngleRad * edgeThreshold;
+
+                    if (isAtEdge) {
+                        console.log(`Best sample is at edge (${(bestAngle * 180 / Math.PI).toFixed(2)}°), extending search...`);
+
+                        // Determine search direction (left or right)
+                        const searchDirection = bestAngle > 0 ? 1 : -1;  // 1 = right, -1 = left
+                        const angleStep = 0.5 * Math.PI / 180;  // 0.5 degree steps
+                        let currentSearchAngle = bestAngle + (searchDirection * angleStep);
+                        let keepSearching = true;
+                        let maxExtendedAngle = 45 * Math.PI / 180;  // Don't go beyond ±45 degrees
+
+                        while (keepSearching && Math.abs(currentSearchAngle) <= maxExtendedAngle) {
+                            const testDir = new THREE.Vector3(
+                                Math.sin(currentSearchAngle),
+                                0,
+                                -Math.cos(currentSearchAngle)
+                            ).normalize();
+
+                            // Test this angle
+                            let distanceTraveled = 0;
+                            let collision = false;
+                            let testPos = samplingOrigin.clone();
+                            let lastValidPos = samplingOrigin.clone();
+
+                            while (!collision && distanceTraveled < 1000) {
+                                testPos.add(testDir.clone().multiplyScalar(stepSize));
+                                distanceTraveled += stepSize;
+
+                                const wallPositions = getActualWallPositions(testPos.z, testPos.y);
+                                const clearance = PLANE_DIMS.wingspan + 8;
+                                const leftWingtip = testPos.x - clearance;
+                                const rightWingtip = testPos.x + clearance;
+
+                                if (leftWingtip < wallPositions.leftWall || rightWingtip > wallPositions.rightWall) {
+                                    collision = true;
+                                    testPos = lastValidPos.clone();
+                                } else {
+                                    lastValidPos = testPos.clone();
+                                }
+
+                                const lowestRim = CONFIG.canyonHeight - 100;
+                                if (testPos.y < 8 || testPos.y > lowestRim - 10) {
+                                    collision = true;
+                                }
+                            }
+
+                            // Store this extended sample
+                            samplePaths.push({
+                                direction: testDir,
+                                distance: distanceTraveled,
+                                endpoint: testPos.clone(),
+                                angle: currentSearchAngle
+                            });
+
+                            // Check if this is better
+                            if (distanceTraveled > bestDistance) {
+                                console.log(`Extended sample at ${(currentSearchAngle * 180 / Math.PI).toFixed(2)}° is better: ${distanceTraveled.toFixed(1)} > ${bestDistance.toFixed(1)}`);
+                                bestDistance = distanceTraveled;
+                                betaBestDirection = testDir.clone();
+                                bestAngle = currentSearchAngle;
+                                // Keep searching
+                                currentSearchAngle += (searchDirection * angleStep);
+                            } else {
+                                // This sample is worse, we found the peak
+                                console.log(`Extended sample at ${(currentSearchAngle * 180 / Math.PI).toFixed(2)}° is worse: ${distanceTraveled.toFixed(1)} <= ${bestDistance.toFixed(1)}, stopping search`);
+                                keepSearching = false;
+                            }
+                        }
+
+                        console.log(`Extended search complete, final best angle: ${(bestAngle * 180 / Math.PI).toFixed(2)}°`);
+                    }
+
                     // Create debug visualization for all sample paths (red lines + collision spheres)
                     if (CONFIG.visualDebugging) {
                         const newSphereBatch = [];  // New batch for this sample
@@ -2073,10 +2190,27 @@
                         if (betaBestDistance > betaStraightAheadDistance * improvementThreshold) {
                             // Steer incrementally toward the best angle
                             // Use the angle directly (positive = right, negative = left)
-                            // Scale by a multiplier for responsiveness
-                            const steeringGain = 15;  // How aggressively to steer
+                            // Adaptive steering gain: more aggressive for larger angles
+                            const bestAngleDegrees = Math.abs(betaBestAngle * 180 / Math.PI);
+                            let steeringGain;
+                            let maxRoll;
+
+                            if (bestAngleDegrees <= 2) {
+                                // Small corrections: moderate roll
+                                steeringGain = 15;
+                                maxRoll = Math.PI / 4;  // ±45 degrees
+                            } else if (bestAngleDegrees <= 10) {
+                                // Medium corrections: more aggressive
+                                steeringGain = 8;
+                                maxRoll = Math.PI / 2;  // ±90 degrees (knife-edge)
+                            } else {
+                                // Large corrections: very aggressive
+                                steeringGain = 4;
+                                maxRoll = Math.PI / 2;  // ±90 degrees (knife-edge)
+                            }
+
                             const targetRoll = betaBestAngle * steeringGain;
-                            const clampedTargetRoll = THREE.MathUtils.clamp(targetRoll, -Math.PI / 4, Math.PI / 4);  // ±45 degrees max
+                            const clampedTargetRoll = THREE.MathUtils.clamp(targetRoll, -maxRoll, maxRoll);
 
                             // Smooth interpolation to target roll
                             roll = THREE.MathUtils.lerp(roll, clampedTargetRoll, delta * 3);

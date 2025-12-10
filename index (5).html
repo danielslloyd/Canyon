@@ -292,6 +292,7 @@
         let debugPitchCircle = null;
         let debugRollCircle = null;
         let debugCollisionBox = null;
+        let debugSteeringArrow = null;  // Red arrow showing target steering direction
         let betaDebugRedLines = [];   // Red sample lines (cleared each frame)
         let betaDebugGreenLines = [];  // Green chosen lines (persistent)
         let betaDebugSphereBatches = [];  // Array of sphere batches (keep last 2 samples)
@@ -788,6 +789,41 @@
             });
             debugRollCircle = new THREE.Line(rollGeometry, rollMaterial);
             scene.add(debugRollCircle);
+        }
+
+        function updateDebugSteeringArrow() {
+            if (!aircraft) return;
+
+            // Remove old arrow
+            if (debugSteeringArrow) {
+                scene.remove(debugSteeringArrow);
+                debugSteeringArrow = null;
+            }
+
+            // Don't create new arrow if debugging is disabled or no target
+            if (!CONFIG.visualDebugging || !betaBestDirection) return;
+
+            // Create arrow from nose pointing in target direction
+            const arrowLength = 50;  // Length of arrow
+            const arrowOrigin = aircraft.position.clone();
+
+            // Add offset to start from nose (12 units forward in local space)
+            const noseOffset = new THREE.Vector3(0, 0, -PLANE_DIMS.length);
+            noseOffset.applyQuaternion(aircraft.quaternion);
+            arrowOrigin.add(noseOffset);
+
+            // Create arrow pointing in betaBestDirection
+            const arrowDir = betaBestDirection.clone().normalize();
+            debugSteeringArrow = new THREE.ArrowHelper(
+                arrowDir,
+                arrowOrigin,
+                arrowLength,
+                0xff0000,  // Red color
+                10,        // Head length
+                8          // Head width
+            );
+
+            scene.add(debugSteeringArrow);
         }
 
         function updateCollisionBoxDebug() {
@@ -2061,12 +2097,16 @@
                     for (let i = 0; i < testAngles.length; i++) {
                         const angle = testAngles[i];
 
-                        // Create 2D direction (X, Z plane, constant Y)
-                        const testDir = new THREE.Vector3(
-                            Math.sin(angle),
+                        // Create 2D direction relative to plane's current heading
+                        // First create local direction (relative to plane's forward vector)
+                        const localDir = new THREE.Vector3(
+                            Math.sin(angle),  // Left/right relative to nose
                             0,  // No vertical component - stay at current elevation
-                            -Math.cos(angle)
+                            -Math.cos(angle)  // Forward component
                         ).normalize();
+
+                        // Rotate by plane's quaternion to get world direction
+                        const testDir = localDir.clone().applyQuaternion(aircraft.quaternion);
 
                         // Extend ray until collision
                         let distanceTraveled = 0;
@@ -2159,11 +2199,13 @@
                         let maxExtendedAngle = 45 * Math.PI / 180;  // Don't go beyond ±45 degrees
 
                         while (keepSearching && Math.abs(currentSearchAngle) <= maxExtendedAngle) {
-                            const testDir = new THREE.Vector3(
+                            // Create direction relative to plane's current heading
+                            const localDir = new THREE.Vector3(
                                 Math.sin(currentSearchAngle),
                                 0,
                                 -Math.cos(currentSearchAngle)
                             ).normalize();
+                            const testDir = localDir.clone().applyQuaternion(aircraft.quaternion);
 
                             // Test this angle
                             let distanceTraveled = 0;
@@ -2313,22 +2355,33 @@
                     roll = Math.min(roll + 8 * delta, Math.PI / 2);  // Violent roll right
                 } else {
                     // Only steer if we have valid sampling data
-                    if (betaStraightAheadDistance > 0) {
+                    if (betaStraightAheadDistance > 0 && betaBestDirection) {
                         // Only adjust if best path is better than straight ahead
                         const improvementThreshold = 1.02;  // 2% improvement threshold
                         if (betaBestDistance > betaStraightAheadDistance * improvementThreshold) {
-                            // Steer incrementally toward the best angle
-                            // Use the angle directly (positive = right, negative = left)
+                            // Calculate current angle to target direction (prevents overshoot)
+                            const currentForward = new THREE.Vector3(0, 0, -1);
+                            currentForward.applyQuaternion(aircraft.quaternion);
+
+                            // Project directions to horizontal plane
+                            const forwardH = new THREE.Vector2(currentForward.x, currentForward.z).normalize();
+                            const targetH = new THREE.Vector2(betaBestDirection.x, betaBestDirection.z).normalize();
+
+                            // Calculate signed angle between current and target heading
+                            const dot = forwardH.dot(targetH);
+                            const cross = forwardH.x * targetH.y - forwardH.y * targetH.x;
+                            const currentAngleToTarget = Math.atan2(cross, dot);
+
                             // Adaptive steering gain: more aggressive for larger angles
-                            const bestAngleDegrees = Math.abs(betaBestAngle * 180 / Math.PI);
+                            const angleToDegrees = Math.abs(currentAngleToTarget * 180 / Math.PI);
                             let steeringGain;
                             let maxRoll;
 
-                            if (bestAngleDegrees <= 2) {
+                            if (angleToDegrees <= 2) {
                                 // Small corrections: moderate roll
                                 steeringGain = 15;
                                 maxRoll = Math.PI / 4;  // ±45 degrees
-                            } else if (bestAngleDegrees <= 10) {
+                            } else if (angleToDegrees <= 10) {
                                 // Medium corrections: more aggressive
                                 steeringGain = 8;
                                 maxRoll = Math.PI / 2;  // ±90 degrees (knife-edge)
@@ -2338,11 +2391,13 @@
                                 maxRoll = Math.PI / 2;  // ±90 degrees (knife-edge)
                             }
 
-                            const targetRoll = betaBestAngle * steeringGain;
+                            // Use current angle instead of sampled angle to prevent overshoot
+                            const targetRoll = currentAngleToTarget * steeringGain;
                             const clampedTargetRoll = THREE.MathUtils.clamp(targetRoll, -maxRoll, maxRoll);
 
-                            // Smooth interpolation to target roll
-                            roll = THREE.MathUtils.lerp(roll, clampedTargetRoll, delta * 3);
+                            // Smooth interpolation to target roll with damping near target
+                            const dampingFactor = angleToDegrees < 1 ? 0.5 : 1.0;  // Slow down when close
+                            roll = THREE.MathUtils.lerp(roll, clampedTargetRoll, delta * 3 * dampingFactor);
                         } else {
                             // Straight ahead is best - level out
                             roll = THREE.MathUtils.lerp(roll, 0, delta * 3);
@@ -2567,6 +2622,7 @@
                 updateLightingPosition();
                 updateDebugLines();
                 updateDebugCircles();
+                updateDebugSteeringArrow();
                 updateCollisionBoxDebug();
                 checkCollisions();
             }

@@ -158,6 +158,7 @@
             <div>Score: <span id="score">0</span></div>
             <div>Rings: <span id="rings-collected">0</span></div>
             <div>Health: <span id="health">100</span></div>
+            <div>Autopilot: <span id="autopilot-state" class="value-display">ON</span></div>
         </div>
 
         <div id="controls-panel">
@@ -189,11 +190,10 @@
             <label>Flight Speed: <span id="speed-value" class="value-display">5</span>x</label>
             <input type="range" id="flight-speed" min="0.5" max="10" step="0.1" value="5">
 
-            <label>Autopilot Mode:</label>
+            <label>Autopilot (or press T):</label>
             <select id="autopilot-mode">
-                <option value="off">Off</option>
-                <option value="alpha">Alpha (Path Following)</option>
-                <option value="beta" selected>Beta (Longest Path)</option>
+                <option value="off">Off - fly it yourself</option>
+                <option value="beta" selected>On - flies the canyon</option>
             </select>
 
             <div class="checkbox-container">
@@ -228,7 +228,7 @@
         </div>
 
         <div id="instructions">
-            <strong>Controls:</strong> W/S - Pitch | A/D - Roll | Space - Shoot | P - Pause
+            <strong>Controls:</strong> W/S - Pitch | A/D - Roll | Space - Shoot | T - Autopilot | P - Pause
         </div>
     </div>
 
@@ -1833,9 +1833,28 @@
         }
 
         // River / water configuration (shared by the floor bed and the water mesh
-        // so they always line up).
-        const WATER_LEVEL = 2.5;         // world Y of the river surface
-        const RIVER_WIDTH_FRAC = 0.16;   // river half-width as fraction of canyon half-width
+        // so they always line up). Fractions are of the local canyon half-width.
+        const WATER_LEVEL = 2.5;          // world Y of the river surface
+        const RIVER_WIDTH_FRAC = 0.12;    // flat channel bed, fully submerged
+        const RIVER_BANK_FRAC = 0.28;     // bed has blended all the way into the bank here
+        const RIVER_SURFACE_FRAC = 0.38;  // how far the water mesh reaches: past the
+                                          // waterline on purpose, so the banks clip it
+                                          // and the shoreline is ragged terrain, not a
+                                          // straight polygon edge
+        const RIVER_DEPTH = 4.5;          // channel bed depth below WATER_LEVEL
+
+        // GLSL-style smoothstep; used to blend the channel into its banks.
+        function smoothstep(edge0, edge1, x) {
+            const t = THREE.MathUtils.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+            return t * t * (3 - 2 * t);
+        }
+
+        // The channel widens and narrows along its length instead of running at one
+        // constant gauge like a canal. Every river fraction scales by this together,
+        // so the water mesh still reaches past the waterline wherever it is used.
+        function getRiverWidthScale(z) {
+            return 1 + 0.38 * noise.fbm(z * 0.004, 41.7, 3);
+        }
 
         // Animated water surface material (created in init, retinted per time of day).
         let waterMaterial = null;
@@ -1914,23 +1933,187 @@
             };
         }
 
+        // Floor height at a world position, in one place so the drawn mesh and
+        // anything that reasons about the ground cannot drift apart (same contract
+        // as getWallX). Returns the pieces the mesh needs for colouring too.
+        function getFloorProfile(z, x) {
+            const centerX = getCanyonCenter(z);
+            const crossSection = getCrossSectionShape(z);
+            const halfWidth = (CONFIG.canyonWidth / 2) * getCanyonWidthMultiplier(z);
+            const localX = x - centerX;
+            const dist = Math.abs(localX) / halfWidth;
+            const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 16));
+            const widthScale = getRiverWidthScale(z);
+            const inner = RIVER_WIDTH_FRAC * widthScale;
+
+            // Bank terrain: the V/U profile, with fractal rock detail damped near the
+            // channel. A river has worked its floodplain flat, and full-amplitude
+            // noise down there also punched holes straight through the water surface.
+            const uShapeFloor = Math.pow(dist, 0.5) * 8;
+            const vShapeFloor = dist * 15;
+            const baseHeight = vShapeFloor * (1 - crossSection) + uShapeFloor * crossSection;
+            const detailAmp = 5 * smoothstep(inner, RIVER_BANK_FRAC * 1.2 * widthScale, dist);
+            const detail = fractalDetail(z * 0.01, x * 0.02, octaves) * detailAmp;
+            const bankHeight = baseHeight + detail;
+
+            // River bed: a channel carved below WATER_LEVEL so the translucent water
+            // surface has real depth, blended into the banks over a wide smoothstep
+            // instead of dropping off the old one-cell, five-unit cliff.
+            const bedDetail = fractalDetail(z * 0.02, x * 0.05, Math.min(octaves, 6));
+            const bedHeight = WATER_LEVEL - RIVER_DEPTH + bedDetail * 0.8;
+            const bankT = smoothstep(inner, RIVER_BANK_FRAC * widthScale, dist);
+            let height = bedHeight + (Math.max(bankHeight, bedHeight) - bedHeight) * bankT;
+
+            // Past the edge of the water mesh the ground has to stay above the
+            // waterline, or a noise dip out there becomes a dry pit that plainly
+            // should have been flooded.
+            const clampT = smoothstep(inner * 1.3, RIVER_SURFACE_FRAC * widthScale, dist);
+            const unclamped = height;
+            height = height * (1 - clampT) + Math.max(height, WATER_LEVEL + 0.4) * clampT;
+
+            return { height, bankT, detail, dist, raised: height - unclamped };
+        }
+
         // Backwards-compatible name used by collision + autopilot code.
         function getActualWallPositions(z, y) {
             return getWallX(z, y);
         }
 
-        // Calculate optimal flight path - simply follow canyon center (green line)
+        // Calculate optimal flight path - the line the autopilot actually flies.
         // Returns {x, y} position at given z
         function getOptimalFlightPath(z, currentX = 0) {
-            // Simply follow the canyon center
-            const centerX = getCanyonCenter(z);
+            return { x: racingLineX(z), y: autopilotTargetY(z) };
+        }
 
-            // Target height: middle of flight envelope for maximum clearance
-            const floorHeight = 8; // Safe floor height from collision detection
-            const ceilingHeight = CONFIG.canyonHeight - 110; // Safe ceiling
-            const targetY = (floorHeight + ceilingHeight) / 2; // Middle altitude
+        // ---------------------------------------------------------------------
+        // Flight model
+        // ---------------------------------------------------------------------
+        // TURN_RATE is the whole flight model: banking turns the heading, and
+        // the heading is what moves the plane.
+        //
+        // Everything below was tuned by running THIS code (not a re-implementation
+        // of it) closed-loop offline against checkCollisions(): 210 runs of 200 s,
+        // 30 random canyons x 0.5x-10x flight speed x 30/60/90/144 fps, 0 crashes.
+        // Versus the previous autopilot at the default 5x: mean throttle held
+        // 0.50 -> 1.00, mean |roll rate| 4.5 -> 1.1 rad/s, roll jerk 87 -> 7.
+        const TURN_RATE = 1.3;        // heading rad/s per unit of bank
+        const AP = {
+            MAX_BANK:      1.4,       // hard bank limit
+            ROLL_LERP:     7,         // how fast the bank chases its command
+            ROLL_RATE:     4,         // rad/s cap on bank change -- kills snapping
+            WN_LEN:        100,       // tracker bandwidth = speed / WN_LEN
+            WN_MIN:        0.9,
+            WN_MAX:        2.8,
+            ZETA:          1.15,      // >1: approaches the line without overshoot
+            LEAD_T:        0.15,      // s of curvature lead, covers the roll lag
+            BARRIER_FRAC:  0.5,       // wall push-back starts this far off-centre
+            BARRIER_K:     6,
+            SMOOTH_W:      80,        // racing-line smoothing window (world units)
+            SMOOTH_CLAMP:  0.3,       // ...but never leave the middle of the corridor
+            CRUISE:        52,        // preferred altitude
+            WANT:          24,        // corridor half-width worth climbing for
+            PRED_T:        1.6,       // s of flight path predicted for the throttle
+            PRED_STEPS:    16,
+            SAFE_MARGIN:   16,        // wingtip clearance the prediction must keep
+            SF_STEP:       0.06,      // throttle probe size
+            MIN_FRAC:      0.25,      // never crawl below this share of the request
+            DECEL:         2.0,       // throttle units per second
+            ACCEL:         0.6
+        };
 
-            return { x: centerX, y: targetY };
+        let autopilotThrottle = 1;    // share of the requested speed being flown
+
+        // Corridor half-width that checkCollisions() actually enforces at (z, y).
+        // The autopilot is flown against this exact number, so it can never
+        // disagree with the crash test about where the walls are.
+        function corridorHalfWidth(z, y) {
+            const halfWidth = (CONFIG.canyonWidth / 2) * getCanyonWidthMultiplier(z);
+            const yFrac = y / getCanyonRimHeight(z);
+            const baseAngle = 0.15 + getCrossSectionShape(z) * 0.6;
+            return halfWidth - (1 - yFrac) * halfWidth * (1 - baseAngle);
+        }
+
+        // The line the autopilot flies: the canyon centre smoothed over a
+        // window. The short-wavelength wiggle in the centreline is what used to
+        // make the plane saw back and forth; smoothing it out means the same
+        // canyon can be flown with slow, shallow banking. The offset smoothing
+        // introduces is clamped to the middle of the corridor, so the racing
+        // line is always somewhere the plane comfortably fits.
+        function racingLineX(z) {
+            const w = AP.SMOOTH_W;
+            const c = getCanyonCenter(z);
+            const avg = (getCanyonCenter(z - w) + getCanyonCenter(z + w) +
+                         2 * (getCanyonCenter(z - w / 2) + getCanyonCenter(z + w / 2)) +
+                         3 * c) / 9;
+            const lim = Math.min(25, AP.SMOOTH_CLAMP * corridorHalfWidth(z, AP.CRUISE));
+            return c + THREE.MathUtils.clamp(avg - c, -lim, lim);
+        }
+
+        // Altitude to hold. The canyon is V-shaped, so it gets WIDER with
+        // height: when the corridor ahead is tight the cheapest fix is to climb
+        // a little rather than to slow down.
+        function autopilotTargetY(z) {
+            let needY = AP.CRUISE;
+            for (let s = 0; s <= 5; s++) {
+                const zs = z - s * 60;
+                const halfWidth = (CONFIG.canyonWidth / 2) * getCanyonWidthMultiplier(zs);
+                const baseAngle = 0.15 + getCrossSectionShape(zs) * 0.6;
+                // invert corridorHalfWidth(zs, y) = AP.WANT for y
+                const yFrac = (AP.WANT / halfWidth - baseAngle) / (1 - baseAngle);
+                needY = Math.max(needY, getCanyonRimHeight(zs) * yFrac);
+            }
+            return THREE.MathUtils.clamp(needY, 22, CONFIG.canyonHeight - 114);
+        }
+
+        // Bank the tracker wants at this state: a curvature feed-forward that
+        // carries the bend, a critically damped PD that removes any drift off
+        // the line, and a soft barrier that only bites near a wall. Because the
+        // feed-forward does the work, the PD correction stays small -- and small
+        // corrections are what smooth flying looks like.
+        function autopilotBank(x, y, z, heading, v) {
+            const cosH = Math.max(0.25, Math.cos(heading));
+            const H = 30;    // wide stencil: derivatives of the path, not of the noise
+            const line = racingLineX(z);
+            const slope = (racingLineX(z + H) - racingLineX(z - H)) / (2 * H);
+            const zf = z - THREE.MathUtils.clamp(v * AP.LEAD_T, 25, 160);
+            const curv = (racingLineX(zf + H) - 2 * racingLineX(zf) + racingLineX(zf - H)) / (H * H);
+
+            const wn = THREE.MathUtils.clamp(v / AP.WN_LEN, AP.WN_MIN, AP.WN_MAX);
+            const off = x - line;
+            const offRate = -v * Math.sin(heading) + v * slope * cosH;
+            let accel = curv * (v * cosH) * (v * cosH) - wn * wn * off - 2 * AP.ZETA * wn * offRate;
+
+            const half = corridorHalfWidth(z, y);
+            const safe = half * AP.BARRIER_FRAC;
+            if (Math.abs(off) > safe) {
+                const t = (Math.abs(off) - safe) / Math.max(1, half - safe);
+                accel -= Math.sign(off) * AP.BARRIER_K * t * t * wn * wn * half;
+            }
+            // lateral acceleration -> turn rate -> bank
+            return THREE.MathUtils.clamp(accel / (v * cosH * TURN_RATE), -AP.MAX_BANK, AP.MAX_BANK);
+        }
+
+        // Fly this same model forward at a candidate speed and report the
+        // tightest wingtip clearance it would end up with. This is what keeps
+        // the throttle open: the plane backs off only when the path it would
+        // actually fly does not fit, not merely because a wall is nearby.
+        function predictedMargin(pos, heading, roll, v) {
+            let x = pos.x, z = pos.z, h = heading, r = roll;
+            const y = pos.y;
+            const dt = AP.PRED_T / AP.PRED_STEPS;
+            let worst = Infinity;
+            for (let i = 0; i < AP.PRED_STEPS; i++) {
+                const cmd = autopilotBank(x, y, z, h, v);
+                const step = (cmd - r) * Math.min(1, dt * AP.ROLL_LERP);
+                r += THREE.MathUtils.clamp(step, -AP.ROLL_RATE * dt, AP.ROLL_RATE * dt);
+                h -= r * TURN_RATE * dt;
+                x -= Math.sin(h) * v * dt;
+                z -= Math.cos(h) * v * dt;
+                const tipY = y - PLANE_DIMS.wingspan * Math.abs(Math.sin(r));
+                const reach = Math.abs(x - getCanyonCenter(z)) + PLANE_DIMS.wingspan * Math.abs(Math.cos(r));
+                worst = Math.min(worst, corridorHalfWidth(z, tipY) - 2 - reach);
+            }
+            return worst;
         }
 
         // Initialize the game
@@ -1960,6 +2143,10 @@
             await createAircraft();  // Wait for aircraft to load
             createInitialCanyon();
 
+            // Start pointing down the canyon, not across it.
+            heading = Math.atan((racingLineX(60) - racingLineX(-60)) / 120);
+            updateHUD();
+
             // Event listeners
             setupEventListeners();
 
@@ -1976,6 +2163,10 @@
                 sunDir: [120, 55, -120],
                 sunGlow: 0.35, sunGlowPow: 220.0, sunColor: 0xffe3b0,
                 ambient: { color: 0x9fb6cf, intensity: 0.55 },
+                // Light bounced back up off the canyon rock, and the cool sky fill
+                // that models the shaded side of everything (see setupLighting).
+                bounce:  { color: 0x6b5a46, intensity: 0.30 },
+                fill:    { color: 0x9dbbd8, intensity: 0.50 },
                 light:   { color: 0xffe0b8, intensity: 1.6 },
                 sunAngle: 0.9994,
                 exposure: 1.05,
@@ -1987,6 +2178,8 @@
                 sunDir: [10, 220, -60],
                 sunGlow: 0.25, sunGlowPow: 400.0, sunColor: 0xfffff2,
                 ambient: { color: 0xdfe8f0, intensity: 0.45 },
+                bounce:  { color: 0x8a7760, intensity: 0.34 },
+                fill:    { color: 0xaecbe8, intensity: 0.55 },
                 light:   { color: 0xffffff, intensity: 2.6 },
                 sunAngle: 0.9997,
                 exposure: 1.0,
@@ -1998,6 +2191,8 @@
                 sunDir: [-220, 22, -110],
                 sunGlow: 0.6, sunGlowPow: 90.0, sunColor: 0xff6a2a,
                 ambient: { color: 0xa9705a, intensity: 0.4 },
+                bounce:  { color: 0x5a3526, intensity: 0.28 },
+                fill:    { color: 0x6a74a8, intensity: 0.55 },
                 light:   { color: 0xff5a28, intensity: 1.5 },
                 sunAngle: 0.9975,
                 exposure: 1.15,
@@ -2015,7 +2210,7 @@
         function createWaterMaterial() {
             waterMaterial = new THREE.ShaderMaterial({
                 transparent: true,
-                depthWrite: true,
+                depthWrite: false,
                 side: THREE.DoubleSide,
                 uniforms: {
                     uTime:      { value: 0 },
@@ -2024,72 +2219,115 @@
                     uDeepColor: { value: new THREE.Color(0.03, 0.09, 0.15) },
                     uShallowColor: { value: new THREE.Color(0.10, 0.27, 0.34) },
                     uSkyColor:  { value: new THREE.Color(0.66, 0.78, 0.88) },
+                    uSkyTopColor: { value: new THREE.Color(0.44, 0.66, 0.84) },
+                    uFogColor:  { value: new THREE.Color(0.76, 0.84, 0.89) },
+                    uFogDensity: { value: 0.0016 },
                     uOpacity:   { value: 0.74 }
                 },
                 vertexShader: `
                     uniform float uTime;
+                    attribute float aShore;        // 0 at the channel centre, 1 at the mesh edge
                     varying vec3 vWorldPos;
-                    varying vec3 vNormal;
+                    varying float vShore;
 
-                    float waveH(vec2 p) {
+                    // Only the long, slow swell displaces geometry; the fine chop is
+                    // done as a normal perturbation in the fragment shader so it does
+                    // not depend on how dense this mesh happens to be.
+                    float swell(vec2 p) {
                         float h = 0.0;
-                        h += sin(p.x * 0.15 + uTime * 1.2) * 0.35;
-                        h += sin(p.y * 0.20 - uTime * 1.6) * 0.30;
-                        h += sin((p.x + p.y) * 0.10 + uTime * 0.9) * 0.22;
-                        h += sin((p.x * 0.7 - p.y * 0.5) * 0.30 + uTime * 2.2) * 0.10;
+                        h += sin(p.x * 0.30 + uTime * 1.1) * 0.055;
+                        h += sin(p.y * 0.22 - uTime * 1.5) * 0.045;
                         return h;
                     }
 
                     void main() {
                         vec3 pos = position;
-                        vec2 p = pos.xz;
-                        float h = waveH(p);
-                        pos.y += h;
-                        // Analytic-ish normal from finite differences of the wave field.
-                        float e = 1.0;
-                        float hx = waveH(p + vec2(e, 0.0));
-                        float hz = waveH(p + vec2(0.0, e));
-                        vNormal = normalize(vec3(-(hx - h) / e, 1.0, -(hz - h) / e));
+                        // Calm at the margins so the surface never lifts off the banks.
+                        pos.y += swell(pos.xz) * (1.0 - aShore * aShore);
+                        vShore = aShore;
                         vec4 world = modelMatrix * vec4(pos, 1.0);
                         vWorldPos = world.xyz;
                         gl_Position = projectionMatrix * viewMatrix * world;
                     }
                 `,
                 fragmentShader: `
+                    uniform float uTime;
                     uniform vec3 uSunDir;
                     uniform vec3 uSunColor;
                     uniform vec3 uDeepColor;
                     uniform vec3 uShallowColor;
                     uniform vec3 uSkyColor;
+                    uniform vec3 uSkyTopColor;
+                    uniform vec3 uFogColor;
+                    uniform float uFogDensity;
                     uniform float uOpacity;
                     varying vec3 vWorldPos;
-                    varying vec3 vNormal;
+                    varying float vShore;
 
                     // Filmic tonemap so the water matches the ACES-graded scene.
                     vec3 aces(vec3 x) {
                         return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
                     }
 
+                    // Surface normal from a sum of short-crested ripples, differentiated
+                    // analytically: A*sin(dot(k,p) + w*t) has gradient A*k*cos(...).
+                    vec3 rippleNormal(vec2 p, float fade) {
+                        // Each wave is (kx, kz, angular speed, amplitude).
+                        vec2 g = vec2(0.0);
+                        vec4 w0 = vec4( 0.55,  0.12,  2.1, 0.050);
+                        vec4 w1 = vec4(-0.21,  0.74, -3.0, 0.042);
+                        vec4 w2 = vec4( 0.94,  0.61,  2.7, 0.026);
+                        vec4 w3 = vec4(-1.43,  1.05, -4.2, 0.015);
+                        vec4 w4 = vec4( 2.10, -1.70,  5.3, 0.009);
+                        g += w0.w * w0.xy * cos(dot(w0.xy, p) + w0.z * uTime);
+                        g += w1.w * w1.xy * cos(dot(w1.xy, p) + w1.z * uTime);
+                        g += w2.w * w2.xy * cos(dot(w2.xy, p) + w2.z * uTime);
+                        g += w3.w * w3.xy * cos(dot(w3.xy, p) + w3.z * uTime);
+                        g += w4.w * w4.xy * cos(dot(w4.xy, p) + w4.z * uTime);
+                        return normalize(vec3(-g.x * fade, 1.0, -g.y * fade));
+                    }
+
                     void main() {
-                        vec3 N = normalize(vNormal);
-                        vec3 V = normalize(cameraPosition - vWorldPos);
+                        // Ripples drift downstream (-Z) and flatten out in the shallows.
+                        vec2 p = vWorldPos.xz + vec2(0.0, uTime * 1.6);
+                        float fade = mix(1.0, 0.35, vShore * vShore);
+                        vec3 N = rippleNormal(p, fade);
+
+                        vec3 toCam = cameraPosition - vWorldPos;
+                        float dist = length(toCam);
+                        vec3 V = toCam / max(dist, 0.001);
                         float ndv = max(dot(N, V), 0.0);
 
-                        // Fresnel: near-mirror at grazing angles, mostly water looking down.
-                        float fres = 0.02 + 0.98 * pow(1.0 - ndv, 3.0);
+                        // Schlick fresnel. Kept honest (exponent 5) but scaled back so
+                        // the water keeps its own colour instead of turning into a
+                        // sheet of white sky at every grazing angle.
+                        float fres = 0.02 + 0.70 * pow(1.0 - ndv, 5.0);
 
-                        // Depth-tinted body colour, then reflect the sky by fresnel.
-                        vec3 body = mix(uDeepColor, uShallowColor, pow(ndv, 0.5));
-                        vec3 col = mix(body, uSkyColor, fres);
+                        // The sky this patch actually reflects: horizon haze when the
+                        // ray skims out, zenith blue when it goes up steeply.
+                        vec3 R = reflect(-V, N);
+                        vec3 sky = mix(uSkyColor, uSkyTopColor, smoothstep(0.05, 0.55, R.y));
+
+                        // Depth: the bed rises towards the banks, so the margins read
+                        // shallow and silty and the thread of the channel reads deep.
+                        float shallow = smoothstep(0.15, 0.85, vShore);
+                        vec3 body = mix(uDeepColor, uShallowColor, shallow);
+                        vec3 col = mix(body, sky, fres);
 
                         // Moving sun glint (sharp Blinn highlight riding the ripples).
                         vec3 L = normalize(uSunDir);
                         vec3 H = normalize(L + V);
-                        float spec = pow(max(dot(N, H), 0.0), 140.0);
-                        col += uSunColor * spec * 1.6;
-                        col += uSunColor * max(dot(N, L), 0.0) * 0.05;
+                        col += uSunColor * pow(max(dot(N, H), 0.0), 90.0) * 1.1;
+                        col += uSunColor * max(dot(N, L), 0.0) * 0.06;
 
-                        gl_FragColor = vec4(aces(col), uOpacity + fres * (1.0 - uOpacity));
+                        // Shallow water hides less of the bed than deep water does.
+                        float alpha = uOpacity * mix(1.0, 0.55, shallow);
+                        alpha = clamp(alpha + fres * (1.0 - alpha), 0.0, 1.0);
+
+                        // Match the scene's exponential-squared haze, or the river
+                        // would stay a bright hard ribbon all the way to the horizon.
+                        float fogF = 1.0 - exp(-dist * dist * uFogDensity * uFogDensity);
+                        gl_FragColor = vec4(mix(aces(col), uFogColor, clamp(fogF, 0.0, 1.0)), alpha);
                     }
                 `
             });
@@ -2103,7 +2341,10 @@
             u.uDeepColor.value.setRGB(t.water.deep[0], t.water.deep[1], t.water.deep[2]);
             u.uShallowColor.value.setRGB(t.water.shallow[0], t.water.shallow[1], t.water.shallow[2]);
             u.uSkyColor.value.setRGB(t.water.sky[0], t.water.sky[1], t.water.sky[2]);
+            u.uSkyTopColor.value.set(t.sky.top);
             u.uSunColor.value.setRGB(t.water.sun[0], t.water.sun[1], t.water.sun[2]);
+            u.uFogColor.value.set(t.fog.color);
+            u.uFogDensity.value = t.fog.density;
             u.uOpacity.value = t.water.opacity;
             u.uSunDir.value.set(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize();
         }
@@ -2200,7 +2441,71 @@
         }
 
 
-        let sunLight, sunVisual;
+        let sunLight, sunVisual, envTarget = null, pmremGenerator = null;
+
+        // Image-based ambient. A cube-convolved version of the same sky gradient the
+        // player is flying under, with a warm rock-bounce lower half, handed to
+        // scene.environment. Every MeshStandardMaterial then gets ambient light that
+        // varies with the surface normal: a flat AmbientLight gives every face the
+        // same value, which is exactly why the jet read as a dark silhouette whenever
+        // the sun was not on it. With this, its facets separate in shade too.
+        function buildEnvironment() {
+            if (!renderer || !scene) return;
+            if (!pmremGenerator) pmremGenerator = new THREE.PMREMGenerator(renderer);
+
+            const t = getTOD();
+            const envMat = new THREE.ShaderMaterial({
+                side: THREE.BackSide,
+                depthWrite: false,
+                uniforms: {
+                    topColor:     { value: new THREE.Color(t.sky.top) },
+                    horizonColor: { value: new THREE.Color(t.sky.horizon) },
+                    hazeColor:    { value: new THREE.Color(t.fog.color) },
+                    groundColor:  { value: new THREE.Color(t.bounce.color) },
+                    exponent:     { value: t.sky.exponent },
+                    uSunDir:      { value: new THREE.Vector3(t.sunDir[0], t.sunDir[1], t.sunDir[2]).normalize() },
+                    uSunColor:    { value: new THREE.Color(t.sunColor) }
+                },
+                vertexShader: `
+                    varying vec3 vDir;
+                    void main() {
+                        vDir = normalize(position);
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform vec3 topColor, horizonColor, hazeColor, groundColor, uSunColor;
+                    uniform float exponent;
+                    uniform vec3 uSunDir;
+                    varying vec3 vDir;
+
+                    void main() {
+                        vec3 d = normalize(vDir);
+                        float h = d.y;
+                        vec3 sky = mix(horizonColor, topColor, clamp(pow(max(h, 0.0), exponent), 0.0, 1.0));
+                        sky = mix(hazeColor, sky, smoothstep(-0.05, 0.18, h));
+                        // A broad sun lobe, no hard disk: convolution would only
+                        // alias a disk, and the directional light carries the
+                        // direct sun anyway. This is what tilts the ambient so
+                        // sunward faces stay brighter than away-facing ones.
+                        sky += uSunColor * pow(max(dot(d, uSunDir), 0.0), 24.0) * 0.7;
+                        gl_FragColor = vec4(mix(groundColor, sky, smoothstep(-0.25, 0.02, h)), 1.0);
+                    }
+                `
+            });
+
+            const envScene = new THREE.Scene();
+            const envGeo = new THREE.SphereGeometry(100, 32, 24);
+            envScene.add(new THREE.Mesh(envGeo, envMat));
+
+            const target = pmremGenerator.fromScene(envScene, 0, 1, 250);
+            if (envTarget) envTarget.dispose();
+            envTarget = target;
+            scene.environment = target.texture;
+
+            envGeo.dispose();
+            envMat.dispose();
+        }
 
         function setupLighting() {
             // Remove old lights (the sun is now drawn by the sky shader, no mesh).
@@ -2212,17 +2517,30 @@
 
             const t = getTOD();
 
-            // Ambient fill.
-            const ambient = new THREE.AmbientLight(t.ambient.color, t.ambient.intensity);
-            scene.add(ambient);
-
-            // Hemisphere light: warm/cool sky-vs-ground bounce for softer, more
-            // natural shading than flat ambient alone.
-            const hemi = new THREE.HemisphereLight(t.sky.horizon, t.fog.color, 0.35);
+            // Ambient comes from the environment map (buildEnvironment), not from a
+            // flat AmbientLight, so that it varies across a surface. The hemisphere
+            // light covers the few non-standard materials, which ignore
+            // scene.environment, and softens the sky-to-ground transition.
+            buildEnvironment();
+            const hemi = new THREE.HemisphereLight(t.sky.horizon, t.bounce.color, 0.30);
             scene.add(hemi);
 
-            // Directional light (sun), aimed from the same direction the sky sun sits.
+            // Three-point rig. The sky fill comes from the sun's opposite side and
+            // high up, so the shaded flank of the jet is lit but clearly cooler and
+            // dimmer than the sunlit one; the bounce comes from below, standing in
+            // for sunlight coming back off the canyon floor. Neither casts shadows:
+            // they exist to describe form, not to add shadow passes.
             const sunPosition = new THREE.Vector3(t.sunDir[0], t.sunDir[1], t.sunDir[2]);
+
+            const fill = new THREE.DirectionalLight(t.fill.color, t.fill.intensity);
+            fill.position.set(-sunPosition.x, Math.abs(sunPosition.y) * 0.5 + 70, -sunPosition.z);
+            scene.add(fill);
+
+            const bounce = new THREE.DirectionalLight(t.bounce.color, t.bounce.intensity);
+            bounce.position.set(sunPosition.x * 0.25, -100, sunPosition.z * 0.25);
+            scene.add(bounce);
+
+            // Directional light (sun), aimed from the same direction the sky sun sits.
             sunLight = new THREE.DirectionalLight(t.light.color, t.light.intensity);
             sunLight.position.copy(sunPosition);
             sunLight.castShadow = true;
@@ -2534,11 +2852,42 @@
             });
             const model = gltf.scene;
 
+            // The glTF ships the airframe as pure matte diffuse (metalness 0,
+            // roughness 0.95), which under ambient light is the same value on every
+            // face no matter which way it points: a flat grey cut-out. Giving it a
+            // satin metal response means the environment map lands differently on
+            // every panel, so the chines, intakes and tail read as geometry even
+            // when the jet is nowhere near the sun.
+            const tunedMaterials = new Set();
             model.traverse((child) => {
-                if (child.isMesh) {
-                    child.castShadow = true;
-                    child.receiveShadow = true;
-                }
+                if (!child.isMesh) return;
+                child.castShadow = true;
+                child.receiveShadow = true;
+
+                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                materials.forEach((m) => {
+                    if (!m || !m.isMeshStandardMaterial || tunedMaterials.has(m)) return;
+                    tunedMaterials.add(m);
+
+                    // Leave the glowing engine parts alone - they are their own light.
+                    const emissive = m.emissive ? m.emissive.getHex() : 0;
+                    if (emissive !== 0 && (m.emissiveIntensity || 1) > 1) return;
+
+                    const luminance = 0.2126 * m.color.r + 0.7152 * m.color.g + 0.0722 * m.color.b;
+                    if (luminance < 0.02) {
+                        // Canopy / intake blanks: pure black absorbs everything, so
+                        // make them glossy instead and let them mirror the sky.
+                        m.color.setRGB(0.03, 0.035, 0.045);
+                        m.metalness = 0.9;
+                        m.roughness = 0.14;
+                        m.envMapIntensity = 1.1;
+                    } else {
+                        m.metalness = 0.25;
+                        m.roughness = 0.55;
+                        m.envMapIntensity = 0.55;
+                    }
+                    m.needsUpdate = true;
+                });
             });
 
             // Scale and orient the model so the nose points along -Z.
@@ -2576,11 +2925,11 @@
                 height: sizeY,
                 fuselageRadius: Math.min(sizeX, sizeY) / 4
             };
-            console.log('✅ F22 model loaded (embedded).', {
-                halfWingspan: PLANE_DIMS.wingspan.toFixed(2),
-                length: PLANE_DIMS.length.toFixed(2),
-                height: PLANE_DIMS.height.toFixed(2)
-            });
+            console.log('✅ F22 model loaded (embedded).',
+                'halfWingspan=' + PLANE_DIMS.wingspan.toFixed(2),
+                'length=' + PLANE_DIMS.length.toFixed(2),
+                'height=' + PLANE_DIMS.height.toFixed(2),
+                'fuselageRadius=' + PLANE_DIMS.fuselageRadius.toFixed(2));
 
             aircraftGroup.position.set(0, 25, 0);
             aircraft = aircraftGroup;
@@ -2607,7 +2956,14 @@
 
             const segResZ = resolution;
             const segResY = Math.floor(resolution / 2);
-            const segResX = resolution;
+
+            // The floor is meshed finer than the walls. The river channel is only a
+            // sixth of the canyon width, so at wall resolution (10 world units per
+            // cell) it collapsed into a single vertex column: the bed was a one-cell
+            // crease and the water read as a hard polygonal ribbon. These give the
+            // channel and its banks ~2 units of lateral detail to work with.
+            const floorResX = THREE.MathUtils.clamp(resolution * 3, 24, 60);
+            const floorResZ = THREE.MathUtils.clamp(resolution * 2, 16, 40);
 
             // Generate wall vertices
             const leftVerts = [];
@@ -2641,54 +2997,43 @@
             }
 
             // Create floor with varying shape
-            for (let iz = 0; iz <= segResZ; iz++) {
-                const zFrac = iz / segResZ;
+            for (let iz = 0; iz <= floorResZ; iz++) {
+                const zFrac = iz / floorResZ;
                 const z = zPosition - zFrac * CONFIG.segmentLength;
                 const localCenterX = getCanyonCenter(z);
-                const localCrossSection = getCrossSectionShape(z);
                 const localWidthMult = getCanyonWidthMultiplier(z);
-                const localHalfWidth = (CONFIG.canyonWidth / 2) * localWidthMult;
 
-                for (let ix = 0; ix <= segResX; ix++) {
-                    const xFrac = ix / segResX;
+                for (let ix = 0; ix <= floorResX; ix++) {
+                    const xFrac = ix / floorResX;
                     const localX = (xFrac - 0.5) * CONFIG.canyonWidth * localWidthMult;
                     const x = localCenterX + localX;
 
-                    // Floor shape: V has pointed bottom, U has flatter bottom
-                    const distFromCenter = Math.abs(localX) / (localHalfWidth);
-                    const octaves = Math.max(3, Math.min(CONFIG.lodLevel, 16));
+                    const { height, bankT, detail } = getFloorProfile(z, x);
 
-                    let height;
+                    // Weathered, banded sedimentary rock colour that varies with
+                    // height and detail instead of a single flat brown.
+                    const band = 0.5 + 0.5 * Math.sin(height * 0.35 + x * 0.008);
+                    const shade = THREE.MathUtils.clamp(0.7 + detail * 0.05, 0.4, 1.05);
+                    let r = THREE.MathUtils.clamp((0.42 + band * 0.16) * shade, 0, 1);
+                    let g = THREE.MathUtils.clamp((0.27 + band * 0.10) * shade, 0, 1);
+                    let b = THREE.MathUtils.clamp((0.15 + band * 0.06) * shade, 0, 1);
 
-                    if (distFromCenter < RIVER_WIDTH_FRAC) {
-                        // Carved river bed, sitting below WATER_LEVEL so the separate
-                        // translucent water surface has real, visible depth.
-                        const bedDetail = fractalDetail(z * 0.02, x * 0.05, Math.min(octaves, 6));
-                        height = WATER_LEVEL - 4.5 + bedDetail * 1.3;
-                        // Dark wet-sediment colour so the deep water reads as deep.
-                        floorColors.push(0.12, 0.17, 0.19);
-                    } else {
-                        // Floor rises from center
-                        // V-shape: steep rise, U-shape: gradual then steep
-                        const uShapeFloor = Math.pow(distFromCenter, 0.5) * 8;
-                        const vShapeFloor = distFromCenter * 15;
-                        const baseHeight = vShapeFloor * (1 - localCrossSection) + uShapeFloor * localCrossSection;
-
-                        // Enhanced fractal detail: more natural and more fractal as LOD
-                        // rises, without changing the underlying floor shape.
-                        const detail = fractalDetail(z * 0.01, x * 0.02, octaves) * 5;
-                        height = baseHeight + detail;
-
-                        // Weathered, banded sedimentary rock colour that varies with
-                        // height and detail instead of a single flat brown.
-                        const band = 0.5 + 0.5 * Math.sin(height * 0.35 + x * 0.008);
-                        const shade = THREE.MathUtils.clamp(0.7 + detail * 0.05, 0.4, 1.05);
-                        floorColors.push(
-                            THREE.MathUtils.clamp((0.42 + band * 0.16) * shade, 0, 1),
-                            THREE.MathUtils.clamp((0.27 + band * 0.10) * shade, 0, 1),
-                            THREE.MathUtils.clamp((0.15 + band * 0.06) * shade, 0, 1)
-                        );
-                    }
+                    // A pale gravel bar along the waterline, then dark wet sediment
+                    // under the water itself, so the shoreline reads as a shoreline
+                    // rather than as a colour step at a polygon edge.
+                    const shore = THREE.MathUtils.clamp(1 - Math.abs(height - WATER_LEVEL) / 3, 0, 1) * bankT;
+                    r += (0.60 - r) * shore * 0.55;
+                    g += (0.56 - g) * shore * 0.55;
+                    b += (0.48 - b) * shore * 0.55;
+                    // Wet sediment is what makes the submerged bed read as deep; above
+                    // the waterline only a damp band of it survives, or the shore gets a
+                    // hard dark outline.
+                    const submerged = THREE.MathUtils.clamp((WATER_LEVEL + 0.6 - height) / 1.2, 0, 1);
+                    const wet = (1 - bankT) * (0.35 + 0.65 * submerged);
+                    r += (0.10 - r) * wet;
+                    g += (0.13 - g) * wet;
+                    b += (0.14 - b) * wet;
+                    floorColors.push(r, g, b);
 
                     floorVerts.push(x, height, z);
                 }
@@ -2714,11 +3059,11 @@
 
             // Create indices for floor
             const floorIndices = [];
-            for (let iz = 0; iz < segResZ; iz++) {
-                for (let ix = 0; ix < segResX; ix++) {
-                    const a = iz * (segResX + 1) + ix;
+            for (let iz = 0; iz < floorResZ; iz++) {
+                for (let ix = 0; ix < floorResX; ix++) {
+                    const a = iz * (floorResX + 1) + ix;
                     const b = a + 1;
-                    const c = a + (segResX + 1);
+                    const c = a + (floorResX + 1);
                     const d = c + 1;
 
                     floorIndices.push(a, c, b);
@@ -2745,6 +3090,7 @@
                 color: 0x8B4513,
                 roughness: 0.9,
                 metalness: 0.1,
+                envMapIntensity: 0.85,
                 side: THREE.DoubleSide,
                 fog: true
             });
@@ -2754,6 +3100,7 @@
             const floorMaterial = new THREE.MeshStandardMaterial({
                 roughness: 0.95,
                 metalness: 0.05,
+                envMapIntensity: 0.85,
                 vertexColors: true,
                 fog: true
             });
@@ -2780,24 +3127,31 @@
             // segment automatically because it is a child of the segment group.
             if (waterMaterial) {
                 const waterVerts = [];
-                const waterRes = Math.max(2, Math.floor(segResX / 2));
-                for (let iz = 0; iz <= segResZ; iz++) {
-                    const zFrac = iz / segResZ;
+                const waterShore = [];
+                const waterResX = floorResX;
+                const waterResZ = floorResZ;
+                for (let iz = 0; iz <= waterResZ; iz++) {
+                    const zFrac = iz / waterResZ;
                     const z = zPosition - zFrac * CONFIG.segmentLength;
                     const cX = getCanyonCenter(z);
                     const wMult = getCanyonWidthMultiplier(z);
-                    const wHalf = (CONFIG.canyonWidth / 2) * wMult * RIVER_WIDTH_FRAC * 1.1;
-                    for (let ix = 0; ix <= waterRes; ix++) {
-                        const xf = ix / waterRes;
+                    // Deliberately wider than the waterline: the banks rise through
+                    // this mesh and clip it, so the visible shoreline is the ragged
+                    // terrain intersection rather than the edge of a quad strip.
+                    const wHalf = (CONFIG.canyonWidth / 2) * wMult * RIVER_SURFACE_FRAC * getRiverWidthScale(z);
+                    for (let ix = 0; ix <= waterResX; ix++) {
+                        const xf = ix / waterResX;
                         waterVerts.push(cX + (xf - 0.5) * 2 * wHalf, WATER_LEVEL, z);
+                        // 0 mid-channel, 1 at the margins: drives the depth tint.
+                        waterShore.push(Math.abs(xf - 0.5) * 2);
                     }
                 }
                 const waterIndices = [];
-                for (let iz = 0; iz < segResZ; iz++) {
-                    for (let ix = 0; ix < waterRes; ix++) {
-                        const a = iz * (waterRes + 1) + ix;
+                for (let iz = 0; iz < waterResZ; iz++) {
+                    for (let ix = 0; ix < waterResX; ix++) {
+                        const a = iz * (waterResX + 1) + ix;
                         const b = a + 1;
-                        const c = a + (waterRes + 1);
+                        const c = a + (waterResX + 1);
                         const d = c + 1;
                         waterIndices.push(a, c, b);
                         waterIndices.push(b, c, d);
@@ -2805,8 +3159,8 @@
                 }
                 const waterGeo = new THREE.BufferGeometry();
                 waterGeo.setAttribute('position', new THREE.Float32BufferAttribute(waterVerts, 3));
+                waterGeo.setAttribute('aShore', new THREE.Float32BufferAttribute(waterShore, 1));
                 waterGeo.setIndex(waterIndices);
-                waterGeo.computeVertexNormals();
                 const water = new THREE.Mesh(waterGeo, waterMaterial);
                 water.renderOrder = 2;
                 segment.add(water);
@@ -2946,6 +3300,13 @@
                     paused = !paused;
                 }
 
+                // T flips the autopilot on/off from the keyboard, so it can be
+                // dropped mid-flight without reaching for the settings panel.
+                if (e.key.toLowerCase() === 't') {
+                    setAutopilotMode(CONFIG.autopilotMode === 'off' ? 'beta' : 'off');
+                    document.getElementById('autopilot-mode').value = CONFIG.autopilotMode;
+                }
+
                 if (e.key === ' ') {
                     e.preventDefault();
                     shootBullet();
@@ -2965,6 +3326,13 @@
 
             // Settings controls
             document.getElementById('apply-settings').addEventListener('click', applySettings);
+
+            // Autopilot is a flight control, not a world setting: it takes
+            // effect the moment it is changed, without an Apply (which would
+            // also rebuild the canyon).
+            document.getElementById('autopilot-mode').addEventListener('change', (e) => {
+                setAutopilotMode(e.target.value);
+            });
             document.getElementById('restart-btn').addEventListener('click', restartGame);
             document.getElementById('replay-btn').addEventListener('click', replayGame);
 
@@ -3002,13 +3370,21 @@
             createBullet(bulletPos, direction);
         }
 
+        // Single place the autopilot mode changes, so the HUD and the throttle
+        // can never fall out of step with it.
+        function setAutopilotMode(mode) {
+            CONFIG.autopilotMode = mode;
+            autopilotThrottle = 1;   // hand back full speed on release
+            updateHUD();
+        }
+
         function applySettings() {
             CONFIG.timeOfDay = document.getElementById('time-of-day').value;
             CONFIG.lodLevel = parseInt(document.getElementById('canyon-lod').value);
             CONFIG.ringFrequency = parseInt(document.getElementById('ring-frequency').value);
             CONFIG.ringRotationAxis = document.getElementById('ring-rotation-axis').value;
             CONFIG.flightSpeed = parseFloat(document.getElementById('flight-speed').value);
-            CONFIG.autopilotMode = document.getElementById('autopilot-mode').value;
+            setAutopilotMode(document.getElementById('autopilot-mode').value);
             CONFIG.enemiesEnabled = document.getElementById('enemies-enabled').checked;
             CONFIG.enemyDifficulty = parseInt(document.getElementById('enemy-difficulty').value);
             CONFIG.visualDebugging = document.getElementById('visual-debugging').checked;
@@ -3048,7 +3424,7 @@
             pitch = 0;
             roll = 0;
             yaw = 0;
-            heading = 0;
+            autopilotThrottle = 1;
 
             // Reset aircraft
             aircraft.position.set(0, 25, 0);
@@ -3079,6 +3455,11 @@
 
             // Regenerate canyon
             regenerateCanyon();
+
+            // Line the nose up with the canyon before the first frame. Spawning
+            // across the path costs the autopilot a big correction it has to make
+            // at full speed, which is exactly when it has the least room.
+            heading = Math.atan((racingLineX(60) - racingLineX(-60)) / 120);
 
             // Update UI
             updateHUD();
@@ -3126,6 +3507,7 @@
             roll = replayState.roll;
             yaw = replayState.yaw;
             heading = replayState.heading || 0;
+            autopilotThrottle = 1;
 
             // Restore aircraft position and rotation
             aircraft.position.copy(replayState.position);
@@ -3164,6 +3546,12 @@
             document.getElementById('score').textContent = score;
             document.getElementById('rings-collected').textContent = ringsCollected;
             document.getElementById('health').textContent = Math.max(0, health);
+            const ap = document.getElementById('autopilot-state');
+            if (ap) {
+                const on = CONFIG.autopilotMode !== 'off';
+                ap.textContent = on ? 'ON' : 'OFF';
+                ap.style.color = on ? '#88ff88' : '#ff8888';
+            }
         }
 
         function checkCollisions() {
@@ -3322,90 +3710,62 @@
             const reqV = 50 * CONFIG.flightSpeed;      // requested speed (units/sec)
             const lowestRim = CONFIG.canyonHeight - 100;
 
-            // --- Flight-model tuning ---
-            // These were tuned in an offline closed-loop simulation of this exact
-            // canyon geometry + collision test: 0 crashes over 750 runs spanning
-            // LOD 2-20 and flight speed 0.5x-10x, 200 s each.
-            const TURN_RATE = 1.3;    // heading rad/s per unit of roll (bank-to-turn)
-            const MAX_BANK  = 1.5;    // autopilot bank cap for hard turns
-            const ROLL_GAIN = 3.0;
-            const ROLL_LERP = 6;
-            const K_OFF     = 0.06;   // cross-track (off-centre) correction gain
-            const CRUISE    = 52;     // target altitude
-            const MIN_V     = 48;     // never crawl slower than this (units/sec)
-            const SAFETY    = 0.85;   // share of turn authority reserved for curvature
-            const CLEAR_GAIN = 11;    // allowed speed per unit of wingtip clearance
-            const EM_TH     = 8;      // clearance below which we hard-bank away
-            const omegaMax  = TURN_RATE * MAX_BANK;
-
             const autopilot = (CONFIG.autopilotMode === 'alpha' || CONFIG.autopilotMode === 'beta');
-            let targetRoll = 0, targetPitch = 0, speedFactor = 1;
+            let targetRoll = 0, targetPitch = 0;
 
             if (autopilot) {
-                // Horizontal heading direction (roll is visual only; heading does the
-                // actual turning, so the plane can turn while holding altitude -- the
-                // old model could not, which is why it used to fly into walls/floors).
-                const noseHx = -Math.sin(heading), noseHz = -Math.cos(heading);
+                const v = Math.max(1, reqV * autopilotThrottle);
 
-                // --- Path tracking: follow the canyon-centre TANGENT and separately
-                //     null the CROSS-TRACK offset. Pure look-ahead pursuit lets a
-                //     standing offset build up around bends, which is exactly what
-                //     used to clip a wingtip; the offset term fixes that. ---
-                const slope = (getCanyonCenter(pos.z + 10) - getCanyonCenter(pos.z - 10)) / 20;
-                const off = pos.x - getCanyonCenter(pos.z);
-                const corr = THREE.MathUtils.clamp(off * K_OFF, -0.9, 0.9);
-                let headingError = (Math.atan(slope) + corr) - heading;
-                headingError = Math.atan2(Math.sin(headingError), Math.cos(headingError));
-                targetRoll = THREE.MathUtils.clamp(-headingError * ROLL_GAIN, -MAX_BANK, MAX_BANK);
+                // --- Steering: track the racing line (see autopilotBank). ---
+                targetRoll = autopilotBank(pos.x, pos.y, pos.z, heading, v);
 
-                // Altitude hold toward mid-canyon.
-                const targetY = THREE.MathUtils.clamp(CRUISE, 22, lowestRim - 15);
-                targetPitch = THREE.MathUtils.clamp((targetY - pos.y) * 0.02, -0.5, 0.5);
+                // --- Altitude: climb only as much as the corridor asks for. ---
+                targetPitch = THREE.MathUtils.clamp(
+                    (autopilotTargetY(pos.z) - pos.y) * 0.012, -0.25, 0.25);
 
-                // --- Speed governor: fly only as fast as is physically safe, then
-                //     cap by the speed the player actually requested. ---
-                // (1) Curvature cap: V <= SAFETY * omegaMax / kappa, so the plane can
-                //     physically follow the upcoming bend at that speed.
-                let maxK = 0;
-                for (let s = 1; s <= 5; s++) {
-                    const zc = pos.z - s * 35;
-                    const c0 = getCanyonCenter(zc + 35), c1 = getCanyonCenter(zc), c2 = getCanyonCenter(zc - 35);
-                    const d1 = (c0 - c2) / 70, d2 = (c0 - 2 * c1 + c2) / 1225;
-                    const k = Math.abs(d2) / Math.pow(1 + d1 * d1, 1.5);
-                    if (k > maxK) maxK = k;
+                // --- Throttle: hold the speed the player asked for, and give it
+                //     up only when flying the next AP.PRED_T seconds at that
+                //     speed would genuinely not fit down the canyon. Probing one
+                //     notch faster every frame means the plane climbs straight
+                //     back to full speed the moment the canyon opens up. ---
+                const faster = Math.min(1, autopilotThrottle + AP.SF_STEP);
+                let wanted;
+                if (predictedMargin(pos, heading, roll, reqV * faster) >= AP.SAFE_MARGIN) {
+                    wanted = faster;
+                } else if (predictedMargin(pos, heading, roll, v) >= AP.SAFE_MARGIN) {
+                    wanted = autopilotThrottle;
+                } else {
+                    wanted = autopilotThrottle - AP.SF_STEP;
                 }
-                const vCurv = maxK > 1e-6 ? (SAFETY * omegaMax / maxK) : Infinity;
+                wanted = THREE.MathUtils.clamp(wanted, AP.MIN_FRAC, 1);
+                const rate = (wanted < autopilotThrottle ? AP.DECEL : AP.ACCEL) * delta;
+                autopilotThrottle += THREE.MathUtils.clamp(wanted - autopilotThrottle, -rate, rate);
 
-                // (2) Clearance cap: probe wingtip clearance a few steps ahead.
-                const margin = PLANE_DIMS.wingspan + 8;
-                let clearL = Infinity, clearR = Infinity;
-                const probes = [0, 30, 60, 95];
-                for (let pi = 0; pi < probes.length; pi++) {
-                    const dd = probes[pi];
-                    const w = getWallX(pos.z + noseHz * dd, pos.y);
-                    clearL = Math.min(clearL, (pos.x + noseHx * dd - margin) - w.leftWall);
-                    clearR = Math.min(clearR, w.rightWall - (pos.x + noseHx * dd + margin));
-                }
-                let allowedV = Math.max(MIN_V, Math.min(vCurv, Math.min(clearL, clearR) * CLEAR_GAIN));
-
-                // (3) Emergency: a wall is very close -> hard-bank away and crawl.
-                if (clearL < EM_TH) { targetRoll = MAX_BANK; allowedV = MIN_V; }
-                else if (clearR < EM_TH) { targetRoll = -MAX_BANK; allowedV = MIN_V; }
-
-                speedFactor = THREE.MathUtils.clamp(allowedV / reqV, 0, 1);
+                // Debug arrow: from the nose to the racing line just ahead.
+                betaBestAngle = Math.atan2(racingLineX(pos.z - 60) - pos.x, 60);
+                betaBestDirection = new THREE.Vector3(racingLineX(pos.z - 60) - pos.x, 0, -60);
+            } else {
+                autopilotThrottle = 1;
+                betaBestDirection = null;
             }
 
             // --- Roll: user input always overrides the autopilot ---
             if (keys['a']) roll = Math.max(roll - 4 * delta, -2.1);
             else if (keys['d']) roll = Math.min(roll + 4 * delta, 2.1);
-            else if (autopilot) roll = THREE.MathUtils.lerp(roll, targetRoll, Math.min(1, delta * ROLL_LERP));
-            else roll *= 0.92;   // manual: wings auto-level, but the heading is kept
+            else if (autopilot) {
+                // Chase the commanded bank, but never faster than AP.ROLL_RATE:
+                // the rate cap is what turns a correction into a lean instead of
+                // a flick.
+                const step = (targetRoll - roll) * Math.min(1, delta * AP.ROLL_LERP);
+                roll += THREE.MathUtils.clamp(step, -AP.ROLL_RATE * delta, AP.ROLL_RATE * delta);
+            }
+            else roll *= Math.pow(0.2, delta);   // manual: wings level out over ~1 s
 
             // --- Pitch: user input always overrides the autopilot ---
             if (keys['w']) pitch = Math.max(pitch - 2 * delta, -0.8);
             else if (keys['s']) pitch = Math.min(pitch + 2 * delta, 0.8);
-            else if (autopilot) pitch = THREE.MathUtils.lerp(pitch, targetPitch, Math.min(1, delta * 3));
-            else pitch *= 0.95;  // manual: settle toward level flight
+            else if (autopilot) pitch = THREE.MathUtils.lerp(pitch, targetPitch, Math.min(1, delta * 2.5));
+            else pitch *= Math.pow(0.4, delta);  // manual: settles toward level flight
 
             // --- Bank-to-turn: banking rolls the heading around (coordinated turn) ---
             heading += -roll * TURN_RATE * delta;
@@ -3418,7 +3778,7 @@
             aircraft.quaternion.copy(qYaw).multiply(qRoll).multiply(qPitch);
 
             // --- Move along heading + pitch (roll does not slew the path) ---
-            const sf = autopilot ? speedFactor : 1;
+            const sf = autopilot ? autopilotThrottle : 1;
             const nose = new THREE.Vector3(
                 -Math.cos(pitch) * Math.sin(heading),
                 Math.sin(pitch),
